@@ -20,17 +20,22 @@ import chronicles
 
 import ./types
 import ./constants
+import ./codec
 import ./rln_interface
 
-export types, constants
+export types, constants, codec
 
 logScope:
   topics = "mix-rln-group-manager"
 
 type
   # Callback types for group manager events
-  OnRegisterCallback* = proc(commitment: IDCommitment, index: MembershipIndex): Future[void] {.gcsafe, raises: [].}
-  OnWithdrawCallback* = proc(commitment: IDCommitment, index: MembershipIndex): Future[void] {.gcsafe, raises: [].}
+  OnRegisterCallback* = proc(
+    commitment: IDCommitment, index: MembershipIndex
+  ): Future[void] {.gcsafe, raises: [].}
+  OnWithdrawCallback* = proc(
+    commitment: IDCommitment, index: MembershipIndex
+  ): Future[void] {.gcsafe, raises: [].}
 
   # Membership entry in the group
   Membership* = object
@@ -39,8 +44,8 @@ type
 
   # Root tracker for maintaining valid roots window
   MerkleRootTracker* = ref object
-    validRoots: Deque[MerkleNode]  # Maintains order for getValidRoots
-    rootSet: HashSet[MerkleNode]   # O(1) lookup for containsRoot
+    validRoots: Deque[MerkleNode] # Maintains order for getValidRoots
+    rootSet: HashSet[MerkleNode] # O(1) lookup for containsRoot
     windowSize: int
 
   # Abstract base class for group managers
@@ -64,7 +69,7 @@ type
     membershipByCommitment: Table[IDCommitment, MembershipIndex]
     membershipByIndex: Table[MembershipIndex, IDCommitment]
     nextIndex: MembershipIndex
-    membershipContentTopic*: string  ## Content topic for membership updates
+    membershipContentTopic*: string ## Content topic for membership updates
 
 # Hash function for MerkleNode (needed for HashSet)
 proc hash*(node: MerkleNode): Hash =
@@ -75,12 +80,14 @@ proc hash*(node: MerkleNode): Hash =
 
 # MerkleRootTracker implementation
 
-proc newMerkleRootTracker*(windowSize: int = AcceptableRootWindowSize): MerkleRootTracker =
+proc newMerkleRootTracker*(
+    windowSize: int = AcceptableRootWindowSize
+): MerkleRootTracker =
   ## Create a new Merkle root tracker.
   MerkleRootTracker(
     validRoots: initDeque[MerkleNode](),
     rootSet: initHashSet[MerkleNode](),
-    windowSize: windowSize
+    windowSize: windowSize,
   )
 
 proc addRoot*(tracker: MerkleRootTracker, root: MerkleNode) =
@@ -110,7 +117,9 @@ proc getValidRoots*(tracker: MerkleRootTracker): seq[MerkleNode] =
   for i, r in tracker.validRoots:
     result[i] = r
 
-proc updateFromInstance*(tracker: MerkleRootTracker, instance: RLNInstance): RlnResult[void] =
+proc updateFromInstance*(
+    tracker: MerkleRootTracker, instance: RLNInstance
+): RlnResult[void] =
   ## Update the tracker with the current root from the RLN instance.
   let root = instance.getMerkleRoot().valueOr:
     return err("Failed to get Merkle root: " & error)
@@ -137,32 +146,41 @@ method stop*(gm: GroupManager): Future[void] {.base, async.} =
   ## Stop the group manager.
   discard
 
-method register*(gm: GroupManager, commitment: IDCommitment): Future[RlnResult[MembershipIndex]] {.base, async.} =
+method register*(
+    gm: GroupManager, commitment: IDCommitment
+): Future[RlnResult[MembershipIndex]] {.base, async.} =
   ## Register a new member (without credentials - external member).
   return err("register must be implemented by concrete type")
 
-method register*(gm: GroupManager, credentials: IdentityCredential): Future[RlnResult[MembershipIndex]] {.base, async.} =
+method register*(
+    gm: GroupManager, credentials: IdentityCredential
+): Future[RlnResult[MembershipIndex]] {.base, async.} =
   ## Register self with the given credentials.
   return err("register with credentials must be implemented by concrete type")
 
-method withdraw*(gm: GroupManager, index: MembershipIndex): Future[RlnResult[void]] {.base, async.} =
+method withdraw*(
+    gm: GroupManager, index: MembershipIndex
+): Future[RlnResult[void]] {.base, async.} =
   ## Remove a member at the given index.
   return err("withdraw must be implemented by concrete type")
 
+{.push raises: [], gcsafe.}
+
 method isReady*(gm: GroupManager): bool {.base.} =
   ## Check if the group manager is ready for proof operations.
-  gm.isInitialized and gm.isSynced and gm.credentials.isSome and gm.membershipIndex.isSome
+  gm.isInitialized and gm.isSynced and gm.credentials.isSome and
+    gm.membershipIndex.isSome
 
 method validateRoot*(gm: GroupManager, root: MerkleNode): bool {.base.} =
   ## Check if a Merkle root is valid (in the acceptable window).
   gm.rootTracker.containsRoot(root)
 
 method generateProof*(
-  gm: GroupManager,
-  signal: openArray[byte],
-  epoch: Epoch,
-  rlnIdentifier: RlnIdentifier,
-  messageId: uint = 0
+    gm: GroupManager,
+    signal: openArray[byte],
+    epoch: Epoch,
+    rlnIdentifier: RlnIdentifier,
+    messageId: uint = 0,
 ): RlnResult[RateLimitProof] {.base.} =
   ## Generate an RLN proof for a message.
   if not gm.isReady():
@@ -174,10 +192,10 @@ method generateProof*(
   gm.rlnInstance.generateRlnProof(creds, index, epoch, rlnIdentifier, signal, messageId)
 
 method verifyProof*(
-  gm: GroupManager,
-  proof: RateLimitProof,
-  signal: openArray[byte],
-  rlnIdentifier: RlnIdentifier
+    gm: GroupManager,
+    proof: RateLimitProof,
+    signal: openArray[byte],
+    rlnIdentifier: RlnIdentifier,
 ): RlnResult[bool] {.base.} =
   ## Verify an RLN proof using the valid roots window.
   if not gm.isInitialized:
@@ -185,6 +203,8 @@ method verifyProof*(
 
   let validRoots = gm.rootTracker.getValidRoots()
   gm.rlnInstance.verifyRlnProof(proof, rlnIdentifier, signal, validRoots)
+
+{.pop.}
 
 proc setOnRegister*(gm: GroupManager, callback: OnRegisterCallback) =
   ## Set callback for when new members are registered.
@@ -197,8 +217,7 @@ proc setOnWithdraw*(gm: GroupManager, callback: OnWithdrawCallback) =
 # OffchainGroupManager implementation
 
 proc newOffchainGroupManager*(
-  rlnInstance: RLNInstance,
-  membershipContentTopic: string = MembershipContentTopic
+    rlnInstance: RLNInstance, membershipContentTopic: string = MembershipContentTopic
 ): OffchainGroupManager =
   ## Create a new offchain group manager.
   ## The membershipContentTopic can be customized for different networks.
@@ -215,7 +234,7 @@ proc newOffchainGroupManager*(
     membershipByCommitment: initTable[IDCommitment, MembershipIndex](),
     membershipByIndex: initTable[MembershipIndex, IDCommitment](),
     nextIndex: 0,
-    membershipContentTopic: membershipContentTopic
+    membershipContentTopic: membershipContentTopic,
   )
 
 proc setPublishCallback*(gm: OffchainGroupManager, callback: PublishCallback) =
@@ -252,7 +271,9 @@ method stop*(gm: OffchainGroupManager): Future[void] {.async.} =
   gm.isSynced = false
   info "Offchain group manager stopped"
 
-method register*(gm: OffchainGroupManager, commitment: IDCommitment): Future[RlnResult[MembershipIndex]] {.async.} =
+method register*(
+    gm: OffchainGroupManager, commitment: IDCommitment
+): Future[RlnResult[MembershipIndex]] {.async.} =
   ## Register a new external member.
   if not gm.isInitialized:
     return err("Group manager not initialized")
@@ -279,11 +300,9 @@ method register*(gm: OffchainGroupManager, commitment: IDCommitment): Future[Rln
   # Broadcast membership update
   if gm.publishCallback.isSome:
     let update = MembershipUpdate(
-      action: MembershipAction.Add,
-      idCommitment: commitment,
-      index: index
+      action: MembershipAction.Add, idCommitment: commitment, index: index
     )
-    let data = update.serialize()
+    let data = update.toBytes()
     await gm.publishCallback.get()(gm.membershipContentTopic, data)
 
   # Call callback
@@ -293,7 +312,9 @@ method register*(gm: OffchainGroupManager, commitment: IDCommitment): Future[Rln
   info "Member registered", index = index
   ok(index)
 
-method register*(gm: OffchainGroupManager, credentials: IdentityCredential): Future[RlnResult[MembershipIndex]] {.async.} =
+method register*(
+    gm: OffchainGroupManager, credentials: IdentityCredential
+): Future[RlnResult[MembershipIndex]] {.async.} =
   ## Register self with the given credentials.
   if gm.credentials.isSome:
     return err("Already registered with credentials")
@@ -309,7 +330,9 @@ method register*(gm: OffchainGroupManager, credentials: IdentityCredential): Fut
   info "Self registered", index = index
   ok(index)
 
-method withdraw*(gm: OffchainGroupManager, index: MembershipIndex): Future[RlnResult[void]] {.async.} =
+method withdraw*(
+    gm: OffchainGroupManager, index: MembershipIndex
+): Future[RlnResult[void]] {.async.} =
   ## Remove a member at the given index.
   if not gm.isInitialized:
     return err("Group manager not initialized")
@@ -334,11 +357,9 @@ method withdraw*(gm: OffchainGroupManager, index: MembershipIndex): Future[RlnRe
   # Broadcast membership update
   if gm.publishCallback.isSome:
     let update = MembershipUpdate(
-      action: MembershipAction.Remove,
-      idCommitment: commitment,
-      index: index
+      action: MembershipAction.Remove, idCommitment: commitment, index: index
     )
-    let data = update.serialize()
+    let data = update.toBytes()
     await gm.publishCallback.get()(gm.membershipContentTopic, data)
 
   # Call callback
@@ -354,7 +375,9 @@ method withdraw*(gm: OffchainGroupManager, index: MembershipIndex): Future[RlnRe
   info "Member withdrawn", index = index
   ok()
 
-proc handleMembershipUpdate*(gm: OffchainGroupManager, update: MembershipUpdate): Future[RlnResult[void]] {.async.} =
+proc handleMembershipUpdate*(
+    gm: OffchainGroupManager, update: MembershipUpdate
+): Future[RlnResult[void]] {.async.} =
   ## Handle a membership update received from the network.
   ## This is called when receiving updates on the membership content topic.
   if not gm.isInitialized:
@@ -388,7 +411,6 @@ proc handleMembershipUpdate*(gm: OffchainGroupManager, update: MembershipUpdate)
       await gm.onRegister.get()(update.idCommitment, update.index)
 
     debug "Member added from network update", index = update.index
-
   of MembershipAction.Remove:
     if not gm.membershipByIndex.hasKey(update.index):
       # Don't have this member, skip
@@ -425,14 +447,18 @@ proc getMemberCount*(gm: OffchainGroupManager): int =
   ## Get the number of registered members.
   gm.membershipByIndex.len
 
-proc getMemberIndex*(gm: OffchainGroupManager, commitment: IDCommitment): Option[MembershipIndex] =
+proc getMemberIndex*(
+    gm: OffchainGroupManager, commitment: IDCommitment
+): Option[MembershipIndex] =
   ## Get the index of a member by commitment.
   if gm.membershipByCommitment.hasKey(commitment):
     some(gm.membershipByCommitment[commitment])
   else:
     none(MembershipIndex)
 
-proc getMemberCommitment*(gm: OffchainGroupManager, index: MembershipIndex): Option[IDCommitment] =
+proc getMemberCommitment*(
+    gm: OffchainGroupManager, index: MembershipIndex
+): Option[IDCommitment] =
   ## Get the commitment of a member by index.
   if gm.membershipByIndex.hasKey(index):
     some(gm.membershipByIndex[index])
@@ -451,7 +477,7 @@ proc serializeTreeSnapshot*(gm: OffchainGroupManager): seq[byte] =
   ##     - index (8 bytes, little-endian)
 
   let memberCount = gm.membershipByIndex.len
-  let dataSize = 16 + (memberCount * 40)  # 8 + 8 + n * (32 + 8)
+  let dataSize = 16 + (memberCount * 40) # 8 + 8 + n * (32 + 8)
   result = newSeq[byte](dataSize)
 
   var offset = 0
@@ -503,25 +529,19 @@ proc loadTreeSnapshot*(gm: OffchainGroupManager, data: seq[byte]): RlnResult[voi
   var offset = 0
 
   # Member count
-  let memberCount = uint64(data[offset + 0]) or
-                    (uint64(data[offset + 1]) shl 8) or
-                    (uint64(data[offset + 2]) shl 16) or
-                    (uint64(data[offset + 3]) shl 24) or
-                    (uint64(data[offset + 4]) shl 32) or
-                    (uint64(data[offset + 5]) shl 40) or
-                    (uint64(data[offset + 6]) shl 48) or
-                    (uint64(data[offset + 7]) shl 56)
+  let memberCount =
+    uint64(data[offset + 0]) or (uint64(data[offset + 1]) shl 8) or
+    (uint64(data[offset + 2]) shl 16) or (uint64(data[offset + 3]) shl 24) or
+    (uint64(data[offset + 4]) shl 32) or (uint64(data[offset + 5]) shl 40) or
+    (uint64(data[offset + 6]) shl 48) or (uint64(data[offset + 7]) shl 56)
   offset += 8
 
   # Next index
-  let nextIndex = uint64(data[offset + 0]) or
-                  (uint64(data[offset + 1]) shl 8) or
-                  (uint64(data[offset + 2]) shl 16) or
-                  (uint64(data[offset + 3]) shl 24) or
-                  (uint64(data[offset + 4]) shl 32) or
-                  (uint64(data[offset + 5]) shl 40) or
-                  (uint64(data[offset + 6]) shl 48) or
-                  (uint64(data[offset + 7]) shl 56)
+  let nextIndex =
+    uint64(data[offset + 0]) or (uint64(data[offset + 1]) shl 8) or
+    (uint64(data[offset + 2]) shl 16) or (uint64(data[offset + 3]) shl 24) or
+    (uint64(data[offset + 4]) shl 32) or (uint64(data[offset + 5]) shl 40) or
+    (uint64(data[offset + 6]) shl 48) or (uint64(data[offset + 7]) shl 56)
   offset += 8
 
   let expectedSize = 16 + int(memberCount) * 40
@@ -538,14 +558,11 @@ proc loadTreeSnapshot*(gm: OffchainGroupManager, data: seq[byte]): RlnResult[voi
     copyMem(addr commitment[0], unsafeAddr data[offset], HashByteSize)
     offset += HashByteSize
 
-    let index = uint64(data[offset + 0]) or
-                (uint64(data[offset + 1]) shl 8) or
-                (uint64(data[offset + 2]) shl 16) or
-                (uint64(data[offset + 3]) shl 24) or
-                (uint64(data[offset + 4]) shl 32) or
-                (uint64(data[offset + 5]) shl 40) or
-                (uint64(data[offset + 6]) shl 48) or
-                (uint64(data[offset + 7]) shl 56)
+    let index =
+      uint64(data[offset + 0]) or (uint64(data[offset + 1]) shl 8) or
+      (uint64(data[offset + 2]) shl 16) or (uint64(data[offset + 3]) shl 24) or
+      (uint64(data[offset + 4]) shl 32) or (uint64(data[offset + 5]) shl 40) or
+      (uint64(data[offset + 6]) shl 48) or (uint64(data[offset + 7]) shl 56)
     offset += 8
 
     # Insert into RLN tree

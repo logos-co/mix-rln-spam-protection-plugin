@@ -557,6 +557,30 @@ proc verifyRlnProof*(
 
   ok(isValid)
 
+proc serializeForFfi(proof: RateLimitProof): seq[byte] =
+  ## Serialize a RateLimitProof in the format expected by librln FFI.
+  ## Format: proof(128) + merkleRoot(32) + epoch(32) + shareX(32) + shareY(32) + nullifier(32) = 288 bytes
+  ## Note: This is different from protobuf encoding used for network transmission.
+  result = newSeq[byte](RateLimitProofByteSize)
+  var offset = 0
+
+  copyMem(addr result[offset], unsafeAddr proof.proof[0], ZksnarkProofByteSize)
+  offset += ZksnarkProofByteSize
+
+  copyMem(addr result[offset], unsafeAddr proof.merkleRoot[0], HashByteSize)
+  offset += HashByteSize
+
+  copyMem(addr result[offset], unsafeAddr proof.epoch[0], HashByteSize)
+  offset += HashByteSize
+
+  copyMem(addr result[offset], unsafeAddr proof.shareX[0], HashByteSize)
+  offset += HashByteSize
+
+  copyMem(addr result[offset], unsafeAddr proof.shareY[0], HashByteSize)
+  offset += HashByteSize
+
+  copyMem(addr result[offset], unsafeAddr proof.nullifier[0], HashByteSize)
+
 proc recoverSecret*(
   instance: RLNInstance,
   proof1: RateLimitProof,
@@ -564,8 +588,8 @@ proc recoverSecret*(
 ): RlnResult[array[32, byte]] =
   ## Recovers the identity secret from two proofs with the same nullifier.
   ## Used for slashing/logging spammers.
-  var proof1Data = proof1.serialize()
-  var proof2Data = proof2.serialize()
+  var proof1Data = proof1.serializeForFfi()
+  var proof2Data = proof2.serializeForFfi()
   var proof1Buffer = proof1Data.toBuffer()
   var proof2Buffer = proof2Data.toBuffer()
   var outputBuffer: Buffer

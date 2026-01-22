@@ -63,16 +63,18 @@
 ## - `NullifierLog` - Tracks proof metadata for spam detection
 ## - `IdentityCredential` - Node's RLN credentials
 ##
-## ## SpamProtectionInterface Methods
+## ## SpamProtection Methods
 ##
-## - `proofSize()` - Returns 288 (fixed RLN proof size)
-## - `generateProof(bindingData)` - Generate proof bound to sphinx packet
-## - `verifyProof(proof, bindingData)` - Verify proof and check for spam
+## - `proofSize` - Field set to 288 (fixed RLN proof size)
+## - `generateProof(bindingData): Result[EncodedProofData, string]` - Generate proof bound to sphinx packet
+## - `verifyProof(encodedProofData, bindingData): Result[bool, string]` - Verify proof and check for spam
 
 import
   ./mix_rln_spam_protection/[
     types,
     constants,
+    protobuf,
+    codec,
     rln_interface,
     group_manager,
     nullifier_log,
@@ -84,6 +86,8 @@ import
 export
   types,
   constants,
+  protobuf,
+  codec,
   spam_protection,
   coordination,
   credentials,

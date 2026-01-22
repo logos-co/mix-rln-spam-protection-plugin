@@ -4,7 +4,7 @@
 
 ## Core type definitions for the RLN spam protection plugin.
 
-import std/[times, options]
+import std/times
 import chronos
 import results
 import ./constants
@@ -183,125 +183,6 @@ proc isEpochValid*(msgEpoch: Epoch, currentEpoch: Epoch): bool =
   let diff = abs(epochDiff(currentEpoch, msgEpoch))
   diff <= MaxEpochGap
 
-# Serialization helpers
-
-proc serialize*(proof: RateLimitProof): seq[byte] =
-  ## Serialize a RateLimitProof to bytes (288 bytes total).
-  ## Format: proof(128) + merkleRoot(32) + epoch(32) + shareX(32) + shareY(32) + nullifier(32)
-  result = newSeq[byte](RateLimitProofByteSize)
-  var offset = 0
-
-  copyMem(addr result[offset], unsafeAddr proof.proof[0], ZksnarkProofByteSize)
-  offset += ZksnarkProofByteSize
-
-  copyMem(addr result[offset], unsafeAddr proof.merkleRoot[0], HashByteSize)
-  offset += HashByteSize
-
-  copyMem(addr result[offset], unsafeAddr proof.epoch[0], HashByteSize)
-  offset += HashByteSize
-
-  copyMem(addr result[offset], unsafeAddr proof.shareX[0], HashByteSize)
-  offset += HashByteSize
-
-  copyMem(addr result[offset], unsafeAddr proof.shareY[0], HashByteSize)
-  offset += HashByteSize
-
-  copyMem(addr result[offset], unsafeAddr proof.nullifier[0], HashByteSize)
-
-proc deserialize*(T: typedesc[RateLimitProof], data: seq[byte]): RlnResult[RateLimitProof] =
-  ## Deserialize bytes to a RateLimitProof.
-  if data.len != RateLimitProofByteSize:
-    return err("Invalid proof size: expected " & $RateLimitProofByteSize & ", got " & $data.len)
-
-  var proof: RateLimitProof
-  var offset = 0
-
-  copyMem(addr proof.proof[0], unsafeAddr data[offset], ZksnarkProofByteSize)
-  offset += ZksnarkProofByteSize
-
-  copyMem(addr proof.merkleRoot[0], unsafeAddr data[offset], HashByteSize)
-  offset += HashByteSize
-
-  copyMem(addr proof.epoch[0], unsafeAddr data[offset], HashByteSize)
-  offset += HashByteSize
-
-  copyMem(addr proof.shareX[0], unsafeAddr data[offset], HashByteSize)
-  offset += HashByteSize
-
-  copyMem(addr proof.shareY[0], unsafeAddr data[offset], HashByteSize)
-  offset += HashByteSize
-
-  copyMem(addr proof.nullifier[0], unsafeAddr data[offset], HashByteSize)
-
-  ok(proof)
-
-proc serialize*(update: MembershipUpdate): seq[byte] =
-  ## Serialize a MembershipUpdate to bytes.
-  # Format: action(1) + idCommitment(32) + index(8) = 41 bytes
-  result = newSeq[byte](41)
-  result[0] = byte(ord(update.action))
-  copyMem(addr result[1], unsafeAddr update.idCommitment[0], HashByteSize)
-  # Index as little-endian
-  let idx = update.index
-  result[33] = byte(idx and 0xFF)
-  result[34] = byte((idx shr 8) and 0xFF)
-  result[35] = byte((idx shr 16) and 0xFF)
-  result[36] = byte((idx shr 24) and 0xFF)
-  result[37] = byte((idx shr 32) and 0xFF)
-  result[38] = byte((idx shr 40) and 0xFF)
-  result[39] = byte((idx shr 48) and 0xFF)
-  result[40] = byte((idx shr 56) and 0xFF)
-
-proc deserialize*(T: typedesc[MembershipUpdate], data: seq[byte]): RlnResult[MembershipUpdate] =
-  ## Deserialize bytes to a MembershipUpdate.
-  if data.len != 41:
-    return err("Invalid membership update size: expected 41, got " & $data.len)
-
-  var update: MembershipUpdate
-  update.action = MembershipAction(data[0])
-  copyMem(addr update.idCommitment[0], unsafeAddr data[1], HashByteSize)
-  update.index = uint64(data[33]) or
-                 (uint64(data[34]) shl 8) or
-                 (uint64(data[35]) shl 16) or
-                 (uint64(data[36]) shl 24) or
-                 (uint64(data[37]) shl 32) or
-                 (uint64(data[38]) shl 40) or
-                 (uint64(data[39]) shl 48) or
-                 (uint64(data[40]) shl 56)
-  ok(update)
-
-proc serialize*(broadcast: ProofMetadataBroadcast): seq[byte] =
-  ## Serialize a ProofMetadataBroadcast to bytes.
-  # Format: nullifier(32) + shareX(32) + shareY(32) + externalNullifier(32) + epoch(32) = 160 bytes
-  result = newSeq[byte](160)
-  var offset = 0
-  copyMem(addr result[offset], unsafeAddr broadcast.nullifier[0], HashByteSize)
-  offset += HashByteSize
-  copyMem(addr result[offset], unsafeAddr broadcast.shareX[0], HashByteSize)
-  offset += HashByteSize
-  copyMem(addr result[offset], unsafeAddr broadcast.shareY[0], HashByteSize)
-  offset += HashByteSize
-  copyMem(addr result[offset], unsafeAddr broadcast.externalNullifier[0], HashByteSize)
-  offset += HashByteSize
-  copyMem(addr result[offset], unsafeAddr broadcast.epoch[0], HashByteSize)
-
-proc deserialize*(T: typedesc[ProofMetadataBroadcast], data: seq[byte]): RlnResult[ProofMetadataBroadcast] =
-  ## Deserialize bytes to a ProofMetadataBroadcast.
-  if data.len != 160:
-    return err("Invalid proof metadata size: expected 160, got " & $data.len)
-
-  var broadcast: ProofMetadataBroadcast
-  var offset = 0
-  copyMem(addr broadcast.nullifier[0], unsafeAddr data[offset], HashByteSize)
-  offset += HashByteSize
-  copyMem(addr broadcast.shareX[0], unsafeAddr data[offset], HashByteSize)
-  offset += HashByteSize
-  copyMem(addr broadcast.shareY[0], unsafeAddr data[offset], HashByteSize)
-  offset += HashByteSize
-  copyMem(addr broadcast.externalNullifier[0], unsafeAddr data[offset], HashByteSize)
-  offset += HashByteSize
-  copyMem(addr broadcast.epoch[0], unsafeAddr data[offset], HashByteSize)
-  ok(broadcast)
 
 # Hex conversion utilities (shared across modules)
 

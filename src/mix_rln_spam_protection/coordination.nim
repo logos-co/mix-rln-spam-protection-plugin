@@ -14,9 +14,10 @@ import chronicles
 
 import ./types
 import ./constants
+import ./codec
 import ./spam_protection
 
-export types, constants
+export types, constants, codec
 
 logScope:
   topics = "mix-rln-coordination"
@@ -81,8 +82,8 @@ proc handleIncomingMessage*(
 
     # Call additional handler if set
     if cl.onMembershipUpdate.isSome:
-      let update = MembershipUpdate.deserialize(data).valueOr:
-        return err("Failed to deserialize update for handler: " & error)
+      let update = MembershipUpdate.decode(data).valueOr:
+        return err("Failed to decode update for handler: " & $error)
       cl.onMembershipUpdate.get()(update)
 
   elif contentTopic == metadataTopic:
@@ -93,8 +94,8 @@ proc handleIncomingMessage*(
 
     # Call additional handler if set
     if cl.onProofMetadata.isSome:
-      let metadata = ProofMetadataBroadcast.deserialize(data).valueOr:
-        return err("Failed to deserialize metadata for handler: " & error)
+      let metadata = ProofMetadataBroadcast.decode(data).valueOr:
+        return err("Failed to decode metadata for handler: " & $error)
       cl.onProofMetadata.get()(metadata)
 
   else:

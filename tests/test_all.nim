@@ -20,6 +20,7 @@ import results
 import ../src/mix_rln_spam_protection
 import ../src/mix_rln_spam_protection/types
 import ../src/mix_rln_spam_protection/constants
+import ../src/mix_rln_spam_protection/codec
 import ../src/mix_rln_spam_protection/nullifier_log
 
 # Use std/unittest (testutils/unittests available in logos-messaging-nim context)
@@ -96,10 +97,12 @@ suite "Type Serialization":
     for i in 0 ..< proof.nullifier.len:
       proof.nullifier[i] = byte((i + 5) mod 256)
 
-    let serialized = proof.serialize()
-    check serialized.len == RateLimitProofByteSize
+    # Serialize using protobuf
+    let serialized = proof.toBytes()
+    check serialized.len > 0  # Protobuf has variable length
 
-    let deserialized = RateLimitProof.deserialize(serialized)
+    # Deserialize using protobuf
+    let deserialized = RateLimitProof.decode(serialized)
     check deserialized.isOk
     let proof2 = deserialized.get()
 
@@ -117,10 +120,12 @@ suite "Type Serialization":
       update.idCommitment[i] = byte(i)
     update.index = 12345
 
-    let serialized = update.serialize()
-    check serialized.len == 41
+    # Serialize using protobuf
+    let serialized = update.toBytes()
+    check serialized.len > 0  # Protobuf has variable length
 
-    let deserialized = MembershipUpdate.deserialize(serialized)
+    # Deserialize using protobuf
+    let deserialized = MembershipUpdate.decode(serialized)
     check deserialized.isOk
     let update2 = deserialized.get()
 
@@ -141,10 +146,12 @@ suite "Type Serialization":
     for i in 0 ..< broadcast.epoch.len:
       broadcast.epoch[i] = byte(i + 4)
 
-    let serialized = broadcast.serialize()
-    check serialized.len == 160
+    # Serialize using protobuf
+    let serialized = broadcast.toBytes()
+    check serialized.len > 0  # Protobuf has variable length
 
-    let deserialized = ProofMetadataBroadcast.deserialize(serialized)
+    # Deserialize using protobuf
+    let deserialized = ProofMetadataBroadcast.decode(serialized)
     check deserialized.isOk
     let broadcast2 = deserialized.get()
 

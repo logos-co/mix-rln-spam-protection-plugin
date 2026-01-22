@@ -17,16 +17,16 @@ import libp2p/protocols/mix/spam_protection as libp2p_spam
 
 import ./types
 import ./constants
+import ./codec
 import ./rln_interface
 import ./group_manager
 import ./nullifier_log
 import ./credentials
 
-export types, constants, group_manager, nullifier_log, credentials
+export types, constants, codec, group_manager, nullifier_log, credentials
 # Re-export nim-libp2p types for convenience
-export libp2p_spam.SpamProtectionInterface, libp2p_spam.SpamProtectionArchitecture
+export libp2p_spam.SpamProtection
 export libp2p_spam.EncodedProofData, libp2p_spam.BindingData
-export libp2p_spam.SpamProtectionConfig, libp2p_spam.initSpamProtectionConfig
 
 logScope:
   topics = "mix-rln-spam-protection"
@@ -49,10 +49,10 @@ type
       ## Content topic for broadcasting proof metadata. Default: "/mix/rln/metadata/v1"
 
   # Main spam protection implementation - inherits from nim-libp2p interface
-  MixRlnSpamProtection* = ref object of libp2p_spam.SpamProtectionInterface
+  MixRlnSpamProtection* = ref object of libp2p_spam.SpamProtection
     ## RLN-based spam protection for mix networks.
     ##
-    ## Implements the SpamProtectionInterface from nim-libp2p for
+    ## Implements the SpamProtection interface from nim-libp2p for
     ## per-hop proof generation and verification.
     config: MixRlnConfig
     rlnInstance: RLNInstance
@@ -105,12 +105,12 @@ proc newMixRlnSpamProtection*(config: MixRlnConfig): RlnResult[MixRlnSpamProtect
 
   ok(
     MixRlnSpamProtection(
+      proofSize: RateLimitProofByteSize, # Set on base class
       config: config,
       rlnInstance: rlnInstance,
       groupManager: groupManager,
       nullifierLog: nullifierLog,
       state: PluginState.Uninitialized,
-      architecture: SpamProtectionArchitecture.PerHopGeneration,
       messageIdCounter: 0,
       lastEpoch: default(Epoch),
       publishCallback: none(PublishCallback),
@@ -207,6 +207,8 @@ proc stop*(sp: MixRlnSpamProtection) {.async.} =
   sp.state = PluginState.Stopped
   info "MixRlnSpamProtection stopped"
 
+{.push raises: [], gcsafe.}
+
 proc isReady*(sp: MixRlnSpamProtection): bool =
   ## Check if the plugin is ready for proof operations.
   sp.state == PluginState.Ready and sp.groupManager.isReady()
@@ -244,11 +246,7 @@ proc registerSelf*(
   info "Self registered", index = index.get()
   ok(index.get())
 
-# SpamProtectionInterface implementation
-
-method proofSize*(sp: MixRlnSpamProtection): int {.gcsafe, raises: [].} =
-  ## Returns the fixed byte length of RLN proofs (288 bytes).
-  RateLimitProofByteSize
+# SpamProtection implementation
 
 method generateProof*(
     sp: MixRlnSpamProtection, bindingData: BindingData
@@ -274,14 +272,14 @@ method generateProof*(
 
   # Generate proof
   let proof = sp.groupManager.generateProof(
-    bindingData, epoch, sp.config.rlnIdentifier, sp.messageIdCounter
+    seq[byte](bindingData), epoch, sp.config.rlnIdentifier, sp.messageIdCounter
   ).valueOr:
     return err("Failed to generate proof: " & error)
 
   sp.messageIdCounter += 1
 
-  # Serialize proof
-  let serialized = proof.serialize()
+  # Serialize proof using protobuf
+  let serialized = proof.toBytes()
 
   debug "Generated RLN proof",
     epoch = epochToUint64(epoch),
@@ -289,6 +287,8 @@ method generateProof*(
     nullifier = proof.nullifier[0 .. 7].toHex() & "..."
 
   ok(serialized)
+
+{.pop.}
 
 proc handleSpamDetected(
     sp: MixRlnSpamProtection, proof: RateLimitProof, conflictingEntry: NullifierEntry
@@ -367,9 +367,9 @@ method verifyProof*(
   if not sp.isReady():
     return err("Plugin not ready")
 
-  # Deserialize proof
-  let proof = RateLimitProof.deserialize(encodedProofData).valueOr:
-    return err("Failed to deserialize proof: " & error)
+  # Deserialize proof using protobuf
+  let proof = RateLimitProof.decode(encodedProofData).valueOr:
+    return err("Failed to decode proof: " & $error)
 
   let curEpoch = currentEpoch()
 
@@ -387,7 +387,9 @@ method verifyProof*(
     return ok(false)
 
   # Verify the zkSNARK proof
-  let isValid = sp.groupManager.verifyProof(proof, bindingData, sp.config.rlnIdentifier).valueOr:
+  let isValid = sp.groupManager.verifyProof(
+    proof, seq[byte](bindingData), sp.config.rlnIdentifier
+  ).valueOr:
     return err("Proof verification error: " & error)
 
   if not isValid:
@@ -406,7 +408,11 @@ method verifyProof*(
     externalNullifier: extNullifier,
   )
 
-  let spamResult = sp.nullifierLog.checkAndInsert(metadata)
+  let spamResult = 
+    try:
+      sp.nullifierLog.checkAndInsert(metadata)
+    except KeyError as e:
+      return err("Nullifier log error: " & e.msg)
 
   if spamResult.isDuplicate:
     debug "Duplicate message detected, discarding"
@@ -431,7 +437,7 @@ method verifyProof*(
       externalNullifier: extNullifier,
       epoch: proof.epoch,
     )
-    let data = broadcast.serialize()
+    let data = broadcast.toBytes()
     asyncSpawn sp.publishCallback.get()(sp.config.proofMetadataContentTopic, data)
 
   debug "Proof verified successfully",
@@ -446,18 +452,22 @@ proc handleMembershipUpdate*(
     sp: MixRlnSpamProtection, data: seq[byte]
 ): Future[RlnResult[void]] {.async.} =
   ## Handle a membership update received from the coordination layer.
-  let update = MembershipUpdate.deserialize(data).valueOr:
-    return err("Failed to deserialize membership update: " & error)
+  let update = MembershipUpdate.decode(data).valueOr:
+    return err("Failed to decode membership update: " & $error)
 
   await sp.groupManager.handleMembershipUpdate(update)
 
 proc handleProofMetadata*(sp: MixRlnSpamProtection, data: seq[byte]): RlnResult[void] =
   ## Handle proof metadata received from the coordination layer.
   ## This enables network-wide spam detection.
-  let broadcast = ProofMetadataBroadcast.deserialize(data).valueOr:
-    return err("Failed to deserialize proof metadata: " & error)
+  let broadcast = ProofMetadataBroadcast.decode(data).valueOr:
+    return err("Failed to decode proof metadata: " & $error)
 
-  let spamResult = sp.nullifierLog.handleNetworkMetadata(broadcast)
+  let spamResult = 
+    try:
+      sp.nullifierLog.handleNetworkMetadata(broadcast)
+    except KeyError as e:
+      return err("Nullifier log error: " & e.msg)
 
   if spamResult.isSpam:
     warn "Spam detected from network metadata",

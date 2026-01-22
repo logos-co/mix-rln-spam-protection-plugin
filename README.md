@@ -5,10 +5,11 @@ RLN-based spam protection plugin for libp2p mix networks. This plugin implements
 ## Overview
 
 This plugin provides:
+
 - **Per-hop proof generation**: Each mix node generates fresh RLN proofs for packets it forwards
 - **Spam detection**: Detects double-signaling (sending more than allowed messages per epoch)
 - **Offchain membership**: Membership managed via logos-messaging content topics (no blockchain required)
-- **Pluggable architecture**: Implements nim-libp2p's `SpamProtectionInterface` for easy integration
+- **Pluggable architecture**: Implements nim-libp2p's `SpamProtection` for easy integration
 
 ## Architecture
 
@@ -16,7 +17,7 @@ This plugin provides:
 ┌─────────────────────────────────────────────────────────────────┐
 │                    MixRlnSpamProtection                          │
 ├─────────────────────────────────────────────────────────────────┤
-│  SpamProtectionInterface (nim-libp2p compatible)                │
+│  SpamProtection (nim-libp2p compatible)                         │
 │    - generateProof(bindingData) → EncodedProofData              │
 │    - verifyProof(proof, bindingData) → bool                     │
 │    - proofSize() → 288 bytes                                    │
@@ -127,8 +128,7 @@ let mixProto = MixProtocol.new(
   mixNodeInfo,
   pubNodeInfo,
   switch,
-  spamProtection = plugin,
-  spamProtectionConfig = initSpamProtectionConfig()
+  spamProtection = Opt.some(SpamProtection(plugin))
 )
 ```
 
@@ -144,17 +144,17 @@ nim c -r --passL:librln.a --passL:-lm tests/test_all.nim
 
 ## Configuration
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `rlnIdentifier` | `"mix-rln-spam-protection/v1"` | Application identifier (must be same across network) |
-| `epochDurationSeconds` | `10.0` | Duration of each epoch |
-| `maxEpochGap` | `5` | Maximum epoch difference for valid proofs |
-| `userMessageLimit` | `100` | Max messages per member per epoch |
-| `keystorePath` | `"rln_keystore.json"` | Path to credentials file |
-| `keystorePassword` | `""` | Password for keystore (empty = no persistence) |
-| `treePath` | `"rln_tree.db"` | Path for Merkle tree persistence |
-| `membershipContentTopic` | `"/mix/rln/membership/v1"` | Content topic for membership broadcasts |
-| `proofMetadataContentTopic` | `"/mix/rln/metadata/v1"` | Content topic for proof metadata broadcasts |
+| Parameter                   | Default                        | Description                                          |
+| --------------------------- | ------------------------------ | ---------------------------------------------------- |
+| `rlnIdentifier`             | `"mix-rln-spam-protection/v1"` | Application identifier (must be same across network) |
+| `epochDurationSeconds`      | `10.0`                         | Duration of each epoch                               |
+| `maxEpochGap`               | `5`                            | Maximum epoch difference for valid proofs            |
+| `userMessageLimit`          | `100`                          | Max messages per member per epoch                    |
+| `keystorePath`              | `"rln_keystore.json"`          | Path to credentials file                             |
+| `keystorePassword`          | `""`                           | Password for keystore (empty = no persistence)       |
+| `treePath`                  | `"rln_tree.db"`                | Path for Merkle tree persistence                     |
+| `membershipContentTopic`    | `"/mix/rln/membership/v1"`     | Content topic for membership broadcasts              |
+| `proofMetadataContentTopic` | `"/mix/rln/metadata/v1"`       | Content topic for proof metadata broadcasts          |
 
 ## Content Topics
 
@@ -224,26 +224,6 @@ let data = readFile("tree_snapshot.bin")
 plugin.groupManager.loadTreeSnapshot(cast[seq[byte]](data))
 ```
 
-## Extending: Onchain Group Manager
-
-The `GroupManager` is designed as an abstract base class. To implement onchain membership:
-
-```nim
-type
-  OnchainGroupManager* = ref object of GroupManager
-    contractAddress: string
-    web3Provider: Web3
-
-method register*(gm: OnchainGroupManager, commitment: IDCommitment): Future[RlnResult[MembershipIndex]] {.async.} =
-  # Call smart contract to register
-  ...
-
-method start*(gm: OnchainGroupManager): Future[RlnResult[void]] {.async.} =
-  # Subscribe to contract events
-  # Sync existing members from chain
-  ...
-```
-
 ## Testing
 
 All 16 tests pass with zerokit v0.9.0:
@@ -272,7 +252,6 @@ nim c -r --passL:/path/to/librln.a --passL:-lm tests/test_all.nim
 ## License
 
 Licensed under either of:
+
 - Apache License, Version 2.0
 - MIT license
-
-at your option.

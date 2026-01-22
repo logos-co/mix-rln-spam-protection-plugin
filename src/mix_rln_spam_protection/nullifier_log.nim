@@ -36,17 +36,17 @@ type
     isDuplicate*: bool
     conflictingEntry*: Option[NullifierEntry]
 
-  NullifierLog* = ref object
-    ## Log tracking nullifiers per epoch for spam detection.
+  NullifierLog* = ref object ## Log tracking nullifiers per epoch for spam detection.
     log: Table[ExternalNullifier, EpochLog]
     cleanupInterval: chronos.Duration
-    maxEpochAgeSecs: int  # Store as seconds for easy comparison with times.Duration
+    maxEpochAgeSecs: int # Store as seconds for easy comparison with times.Duration
     cleanupTask: Future[void]
     running: bool
 
 proc newNullifierLog*(
-  cleanupIntervalSecs: float = NullifierLogCleanupIntervalSeconds.float,
-  maxEpochAgeSecs: float = (MaxEpochGap.float * EpochDurationSeconds + EpochDurationSeconds)
+    cleanupIntervalSecs: float = NullifierLogCleanupIntervalSeconds.float,
+    maxEpochAgeSecs: float =
+      (MaxEpochGap.float * EpochDurationSeconds + EpochDurationSeconds),
 ): NullifierLog =
   ## Create a new nullifier log.
   NullifierLog(
@@ -54,7 +54,7 @@ proc newNullifierLog*(
     cleanupInterval: chronos.seconds(int(cleanupIntervalSecs)),
     maxEpochAgeSecs: int(maxEpochAgeSecs),
     cleanupTask: nil,
-    running: false
+    running: false,
   )
 
 proc cleanup(nl: NullifierLog) =
@@ -123,9 +123,8 @@ proc stop*(nl: NullifierLog) {.async.} =
   info "Nullifier log stopped"
 
 proc checkAndInsert*(
-  nl: NullifierLog,
-  metadata: ProofMetadata
-): SpamDetectionResult =
+    nl: NullifierLog, metadata: ProofMetadata
+): SpamDetectionResult {.raises: [KeyError].} =
   ## Check if a proof is spam or duplicate, and insert if valid.
   ##
   ## Returns:
@@ -134,9 +133,7 @@ proc checkAndInsert*(
   ##   - conflictingEntry contains the previous entry if spam detected
 
   result = SpamDetectionResult(
-    isSpam: false,
-    isDuplicate: false,
-    conflictingEntry: none(NullifierEntry)
+    isSpam: false, isDuplicate: false, conflictingEntry: none(NullifierEntry)
   )
 
   let extNullifier = metadata.externalNullifier
@@ -153,7 +150,7 @@ proc checkAndInsert*(
     for entry in existingEntries:
       # Check if exact duplicate (same shares)
       if entry.metadata.shareX == metadata.shareX and
-         entry.metadata.shareY == metadata.shareY:
+          entry.metadata.shareY == metadata.shareY:
         result.isDuplicate = true
         debug "Duplicate message detected", nullifier = nullifier
         return
@@ -170,10 +167,7 @@ proc checkAndInsert*(
       return
 
   # Not spam or duplicate, insert the entry
-  let entry = NullifierEntry(
-    metadata: metadata,
-    timestamp: stdtimes.getTime()
-  )
+  let entry = NullifierEntry(metadata: metadata, timestamp: stdtimes.getTime())
 
   if not nl.log[extNullifier].hasKey(nullifier):
     nl.log[extNullifier][nullifier] = @[]
@@ -194,21 +188,21 @@ proc hasDuplicate*(nl: NullifierLog, metadata: ProofMetadata): bool =
 
   for entry in nl.log[extNullifier][nullifier]:
     if entry.metadata.shareX == metadata.shareX and
-       entry.metadata.shareY == metadata.shareY:
+        entry.metadata.shareY == metadata.shareY:
       return true
 
   false
 
-proc hasNullifier*(nl: NullifierLog, extNullifier: ExternalNullifier, nullifier: Nullifier): bool =
+proc hasNullifier*(
+    nl: NullifierLog, extNullifier: ExternalNullifier, nullifier: Nullifier
+): bool =
   ## Check if any entry exists for the given nullifier.
   if not nl.log.hasKey(extNullifier):
     return false
   nl.log[extNullifier].hasKey(nullifier)
 
 proc getEntries*(
-  nl: NullifierLog,
-  extNullifier: ExternalNullifier,
-  nullifier: Nullifier
+    nl: NullifierLog, extNullifier: ExternalNullifier, nullifier: Nullifier
 ): seq[NullifierEntry] =
   ## Get all entries for a nullifier.
   if not nl.log.hasKey(extNullifier):
@@ -233,8 +227,7 @@ proc clear*(nl: NullifierLog) =
 
 # Handle incoming proof metadata from network coordination
 proc handleNetworkMetadata*(
-  nl: NullifierLog,
-  broadcast: ProofMetadataBroadcast
+    nl: NullifierLog, broadcast: ProofMetadataBroadcast
 ): SpamDetectionResult =
   ## Process proof metadata received from the network coordination layer.
   ## This enables network-wide spam detection.
@@ -242,7 +235,7 @@ proc handleNetworkMetadata*(
     nullifier: broadcast.nullifier,
     shareX: broadcast.shareX,
     shareY: broadcast.shareY,
-    externalNullifier: broadcast.externalNullifier
+    externalNullifier: broadcast.externalNullifier,
   )
 
   nl.checkAndInsert(metadata)
