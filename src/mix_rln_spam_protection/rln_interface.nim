@@ -20,8 +20,7 @@ type
     `ptr`*: ptr uint8
     len*: uint
 
-  RLN* = object
-    ## Opaque RLN context handle
+  RLN* = object ## Opaque RLN context handle
 
 proc toBuffer*(x: openArray[byte]): Buffer =
   ## Converts the input to a Buffer object.
@@ -40,6 +39,7 @@ proc toBuffer*(x: openArray[byte]): Buffer =
 proc key_gen*(
   output_buffer: ptr Buffer, is_little_endian: bool
 ): bool {.importc: "extended_key_gen".}
+
 ## Generates identity trapdoor, identity nullifier, identity secret hash and id commitment
 ## tuple serialized inside output_buffer as:
 ## | identity_trapdoor<32> | identity_nullifier<32> | identity_secret_hash<32> | id_commitment<32> |
@@ -50,6 +50,7 @@ proc key_gen*(
 proc seeded_key_gen*(
   input_buffer: ptr Buffer, output_buffer: ptr Buffer, is_little_endian: bool
 ): bool {.importc: "seeded_extended_key_gen".}
+
 ## Generates identity credentials using ChaCha20 seeded with an arbitrary long seed
 ## serialized in input_buffer. The input seed is hashed using Keccak256 before
 ## being passed to ChaCha20 as seed.
@@ -58,6 +59,7 @@ proc seeded_key_gen*(
 proc generate_proof*(
   ctx: ptr RLN, input_buffer: ptr Buffer, output_buffer: ptr Buffer
 ): bool {.importc: "generate_rln_proof".}
+
 ## rln-v2
 ## input_buffer: [ identity_secret<32> | identity_index<8> | user_message_limit<32> | message_id<32> | external_nullifier<32> | signal_len<8> | signal<var> ]
 ## output_buffer: [ proof<128> | root<32> | external_nullifier<32> | share_x<32> | share_y<32> | nullifier<32> ]
@@ -65,6 +67,7 @@ proc generate_proof*(
 proc generate_proof_with_witness*(
   ctx: ptr RLN, input_buffer: ptr Buffer, output_buffer: ptr Buffer
 ): bool {.importc: "generate_rln_proof_with_witness".}
+
 ## rln-v2 with witness (collection of secret inputs with proper serialization)
 ## input_buffer: [ identity_secret<32> | user_message_limit<32> | message_id<32> | path_elements<Vec<32>> | identity_path_index<Vec<1>> | x<32> | external_nullifier<32> ]
 ## output_buffer: [ proof<128> | root<32> | external_nullifier<32> | share_x<32> | share_y<32> | nullifier<32> ]
@@ -72,6 +75,7 @@ proc generate_proof_with_witness*(
 proc verify*(
   ctx: ptr RLN, proof_buffer: ptr Buffer, proof_is_valid_ptr: ptr bool
 ): bool {.importc: "verify_rln_proof".}
+
 ## rln-v2
 ## proof_buffer: [ proof<128> | root<32> | external_nullifier<32> | share_x<32> | share_y<32> | nullifier<32> | signal_len<8> | signal<var> ]
 ## proof_is_valid_ptr: true if proof is valid, false otherwise
@@ -83,18 +87,21 @@ proc verify_with_roots*(
   roots_buffer: ptr Buffer,
   proof_is_valid_ptr: ptr bool,
 ): bool {.importc: "verify_with_roots".}
+
 ## Same as verify but accepts multiple valid roots for verification
 ## roots_buffer: concatenation of 32-byte root values in little endian
 
 proc zk_prove*(
   ctx: ptr RLN, input_buffer: ptr Buffer, output_buffer: ptr Buffer
 ): bool {.importc: "prove".}
+
 ## Low-level zkSNARK proof generation
 ## output_buffer: [ proof<128> ]
 
 proc zk_verify*(
   ctx: ptr RLN, proof_buffer: ptr Buffer, proof_is_valid_ptr: ptr bool
 ): bool {.importc: "verify".}
+
 ## Low-level zkSNARK proof verification
 
 #-------------------------------- Merkle tree operations -----------------------------------------
@@ -102,74 +109,68 @@ proc zk_verify*(
 proc set_leaf*(
   ctx: ptr RLN, index: uint, input_buffer: ptr Buffer
 ): bool {.importc: "set_leaf".}
+
 ## Sets a leaf at the given index in the Merkle tree
 
 proc set_next_leaf*(
   ctx: ptr RLN, input_buffer: ptr Buffer
 ): bool {.importc: "set_next_leaf".}
+
 ## Sets the next available leaf in the Merkle tree
 
-proc delete_leaf*(
-  ctx: ptr RLN, index: uint
-): bool {.importc: "delete_leaf".}
+proc delete_leaf*(ctx: ptr RLN, index: uint): bool {.importc: "delete_leaf".}
 ## Deletes a leaf at the given index
 
 proc get_leaf*(
   ctx: ptr RLN, index: uint, output_buffer: ptr Buffer
 ): bool {.importc: "get_leaf".}
+
 ## Gets the leaf value at the given index
 
 proc leaves_set*(ctx: ptr RLN): uint {.importc: "leaves_set".}
 ## Returns the number of leaves set in the tree
 
-proc get_root*(
-  ctx: ptr RLN, output_buffer: ptr Buffer
-): bool {.importc: "get_root".}
+proc get_root*(ctx: ptr RLN, output_buffer: ptr Buffer): bool {.importc: "get_root".}
 ## Gets the current Merkle root
 
 proc get_proof*(
   ctx: ptr RLN, index: uint, output_buffer: ptr Buffer
 ): bool {.importc: "get_proof".}
+
 ## Gets the Merkle proof for a leaf at the given index
 
 proc init_tree_with_leaves*(
   ctx: ptr RLN, input_buffer: ptr Buffer
 ): bool {.importc: "init_tree_with_leaves".}
+
 ## Initializes the tree with a batch of leaves
 
 proc set_leaves_from*(
   ctx: ptr RLN, index: uint, input_buffer: ptr Buffer
 ): bool {.importc: "set_leaves_from".}
+
 ## Sets multiple leaves starting from the given index
 
 proc atomic_operation*(
-  ctx: ptr RLN,
-  index: uint,
-  leaves_buffer: ptr Buffer,
-  indices_buffer: ptr Buffer
+  ctx: ptr RLN, index: uint, leaves_buffer: ptr Buffer, indices_buffer: ptr Buffer
 ): bool {.importc: "atomic_operation".}
+
 ## Atomic batch update operation
 
 proc seq_atomic_operation*(
-  ctx: ptr RLN,
-  leaves_buffer: ptr Buffer,
-  indices_buffer: ptr Buffer
+  ctx: ptr RLN, leaves_buffer: ptr Buffer, indices_buffer: ptr Buffer
 ): bool {.importc: "seq_atomic_operation".}
+
 ## Sequential atomic batch operation
 
 #-------------------------------- Common procedures -------------------------------------------
 
-proc new_circuit*(
-  tree_depth: uint, input_buffer: ptr Buffer, ctx: ptr (ptr RLN)
-): bool {.importc: "new".}
-## Creates an RLN instance with circuit resources from path in input_buffer
-
-proc new_circuit*(ctx: ptr (ptr RLN)): bool {.importc: "new".}
-## Creates an RLN instance with default/bundled circuit resources
+# Note: new_circuit functions are called via inline C to avoid Nim overload issues
 
 proc new_circuit_from_data*(
   zkey_buffer: ptr Buffer, graph_buffer: ptr Buffer, ctx: ptr (ptr RLN)
 ): bool {.importc: "new_with_params".}
+
 ## Creates an RLN instance from raw circuit data buffers
 
 #-------------------------------- Hashing utils -------------------------------------------
@@ -177,11 +178,13 @@ proc new_circuit_from_data*(
 proc sha256*(
   input_buffer: ptr Buffer, output_buffer: ptr Buffer, is_little_endian: bool
 ): bool {.importc: "hash".}
+
 ## SHA256 hash mapped to field element (for signal hashing)
 
 proc poseidon*(
   input_buffer: ptr Buffer, output_buffer: ptr Buffer, is_little_endian: bool
 ): bool {.importc: "poseidon_hash".}
+
 ## Poseidon hash (for identity secret hash, external nullifier computation)
 
 #-------------------------------- Secret recovery (for slashing) ----------------------------
@@ -190,8 +193,9 @@ proc recover_id_secret*(
   ctx: ptr RLN,
   proof1_buffer: ptr Buffer,
   proof2_buffer: ptr Buffer,
-  output_buffer: ptr Buffer
+  output_buffer: ptr Buffer,
 ): bool {.importc: "recover_id_secret".}
+
 ## Recovers the identity secret from two proofs with the same nullifier
 
 #-------------------------------- Metadata -------------------------------------------
@@ -199,11 +203,13 @@ proc recover_id_secret*(
 proc set_metadata*(
   ctx: ptr RLN, input_buffer: ptr Buffer
 ): bool {.importc: "set_metadata".}
+
 ## Sets metadata on the RLN instance
 
 proc get_metadata*(
   ctx: ptr RLN, output_buffer: ptr Buffer
 ): bool {.importc: "get_metadata".}
+
 ## Gets metadata from the RLN instance
 
 proc flush*(ctx: ptr RLN): bool {.importc: "flush".}
@@ -213,10 +219,8 @@ proc flush*(ctx: ptr RLN): bool {.importc: "flush".}
 ## High-level Nim wrappers (matching logos-messaging patterns)
 ######################################################################
 
-type
-  RLNInstance* = ref object
-    ## High-level wrapper around the zerokit RLN instance.
-    ctx*: ptr RLN
+type RLNInstance* = ref object ## High-level wrapper around the zerokit RLN instance.
+  ctx*: ptr RLN
 
 # Note: RlnResult[T] is defined in types.nim to avoid circular imports
 
@@ -284,16 +288,32 @@ proc createRLNInstance*(resourcesPath: string = ""): RlnResult[RLNInstance] =
   ## Creates an RLN instance.
   ## If resourcesPath is empty, uses bundled resources.
   var ctx: ptr RLN
+  var success: bool
 
-  let success =
-    if resourcesPath.len == 0:
-      new_circuit(addr ctx)
-    else:
-      var pathBytes = newSeq[byte](resourcesPath.len)
-      if resourcesPath.len > 0:
-        copyMem(addr pathBytes[0], unsafeAddr resourcesPath[0], resourcesPath.len)
-      var pathBuffer = pathBytes.toBuffer()
-      new_circuit(MerkleTreeDepth.uint, addr pathBuffer, addr ctx)
+  if resourcesPath.len == 0:
+    # Use default empty path - pass empty buffer with tree depth
+    var emptyBytes = newSeq[byte](0)
+    var emptyBuffer = emptyBytes.toBuffer()
+    let treeDepth = MerkleTreeDepth.uint
+    {.
+      emit:
+        """
+    extern NIM_BOOL new(unsigned int tree_depth, void* input_buffer, void** ctx);
+    `success` = new(`treeDepth`, &`emptyBuffer`, &`ctx`);
+    """
+    .}
+  else:
+    var pathBytes = newSeq[byte](resourcesPath.len)
+    copyMem(addr pathBytes[0], unsafeAddr resourcesPath[0], resourcesPath.len)
+    var pathBuffer = pathBytes.toBuffer()
+    let treeDepth = MerkleTreeDepth.uint
+    {.
+      emit:
+        """
+    extern NIM_BOOL new(unsigned int tree_depth, void* input_buffer, void** ctx);
+    `success` = new(`treeDepth`, &`pathBuffer`, &`ctx`);
+    """
+    .}
 
   if not success or ctx.isNil:
     return err("Failed to create RLN instance")
@@ -332,7 +352,9 @@ proc keccak256Hash*(data: openArray[byte]): RlnResult[array[32, byte]] =
   copyMem(addr hashResult[0], unsafeAddr hashDigest.data[0], 32)
   ok(hashResult)
 
-proc computeExternalNullifier*(epoch: Epoch, rlnIdentifier: RlnIdentifier): RlnResult[ExternalNullifier] =
+proc computeExternalNullifier*(
+    epoch: Epoch, rlnIdentifier: RlnIdentifier
+): RlnResult[ExternalNullifier] =
   ## Compute external nullifier = Poseidon(epoch, rlnIdentifier)
   ## This matches logos-messaging-nim's generateExternalNullifier
   poseidonHash(@[@epoch, @rlnIdentifier])
@@ -351,7 +373,9 @@ proc getMerkleRoot*(instance: RLNInstance): RlnResult[MerkleNode] =
   copyMem(addr root[0], outputBuffer.`ptr`, 32)
   ok(root)
 
-proc getMerkleProof*(instance: RLNInstance, index: MembershipIndex): RlnResult[seq[byte]] =
+proc getMerkleProof*(
+    instance: RLNInstance, index: MembershipIndex
+): RlnResult[seq[byte]] =
   ## Gets the Merkle proof for a member at the given index.
   var outputBuffer: Buffer
 
@@ -363,7 +387,9 @@ proc getMerkleProof*(instance: RLNInstance, index: MembershipIndex): RlnResult[s
     copyMem(addr proof[0], outputBuffer.`ptr`, outputBuffer.len)
   ok(proof)
 
-proc insertMember*(instance: RLNInstance, commitment: IDCommitment): RlnResult[MembershipIndex] =
+proc insertMember*(
+    instance: RLNInstance, commitment: IDCommitment
+): RlnResult[MembershipIndex] =
   ## Inserts a new member into the Merkle tree.
   ## Returns the index of the inserted member.
   let currentIndex = leaves_set(instance.ctx)
@@ -376,7 +402,9 @@ proc insertMember*(instance: RLNInstance, commitment: IDCommitment): RlnResult[M
 
   ok(MembershipIndex(currentIndex))
 
-proc insertMembers*(instance: RLNInstance, startIndex: MembershipIndex, commitments: seq[IDCommitment]): RlnResult[void] =
+proc insertMembers*(
+    instance: RLNInstance, startIndex: MembershipIndex, commitments: seq[IDCommitment]
+): RlnResult[void] =
   ## Inserts multiple members starting at the given index.
   if commitments.len == 0:
     return ok()
@@ -398,7 +426,9 @@ proc removeMember*(instance: RLNInstance, index: MembershipIndex): RlnResult[voi
     return err("Failed to remove member")
   ok()
 
-proc insertMemberAt*(instance: RLNInstance, index: MembershipIndex, commitment: IDCommitment): RlnResult[void] =
+proc insertMemberAt*(
+    instance: RLNInstance, index: MembershipIndex, commitment: IDCommitment
+): RlnResult[void] =
   ## Inserts a member at a specific index in the Merkle tree.
   var commitmentData = @commitment
   var inputBuffer = commitmentData.toBuffer()
@@ -408,13 +438,13 @@ proc insertMemberAt*(instance: RLNInstance, index: MembershipIndex, commitment: 
   ok()
 
 proc generateRlnProof*(
-  instance: RLNInstance,
-  credential: IdentityCredential,
-  memberIndex: MembershipIndex,
-  epoch: Epoch,
-  rlnIdentifier: RlnIdentifier,
-  signal: openArray[byte],
-  messageId: uint = 0
+    instance: RLNInstance,
+    credential: IdentityCredential,
+    memberIndex: MembershipIndex,
+    epoch: Epoch,
+    rlnIdentifier: RlnIdentifier,
+    signal: openArray[byte],
+    messageId: uint = 0,
 ): RlnResult[RateLimitProof] =
   ## Generate an RLN proof for a message.
   ## This follows the RLN-v2 input format.
@@ -507,11 +537,11 @@ proc generateRlnProof*(
   ok(proof)
 
 proc verifyRlnProof*(
-  instance: RLNInstance,
-  proof: RateLimitProof,
-  rlnIdentifier: RlnIdentifier,
-  signal: openArray[byte],
-  validRoots: seq[MerkleNode] = @[]
+    instance: RLNInstance,
+    proof: RateLimitProof,
+    rlnIdentifier: RlnIdentifier,
+    signal: openArray[byte],
+    validRoots: seq[MerkleNode] = @[],
 ): RlnResult[bool] =
   ## Verify an RLN proof.
 
@@ -548,7 +578,9 @@ proc verifyRlnProof*(
       rootsData.add(@root)
     var rootsBuffer = rootsData.toBuffer()
 
-    if not verify_with_roots(instance.ctx, addr proofBuffer, addr rootsBuffer, addr isValid):
+    if not verify_with_roots(
+      instance.ctx, addr proofBuffer, addr rootsBuffer, addr isValid
+    ):
       return err("Proof verification call failed")
   else:
     # Verify with current root only
@@ -582,9 +614,7 @@ proc serializeForFfi(proof: RateLimitProof): seq[byte] =
   copyMem(addr result[offset], unsafeAddr proof.nullifier[0], HashByteSize)
 
 proc recoverSecret*(
-  instance: RLNInstance,
-  proof1: RateLimitProof,
-  proof2: RateLimitProof
+    instance: RLNInstance, proof1: RateLimitProof, proof2: RateLimitProof
 ): RlnResult[array[32, byte]] =
   ## Recovers the identity secret from two proofs with the same nullifier.
   ## Used for slashing/logging spammers.
@@ -594,7 +624,9 @@ proc recoverSecret*(
   var proof2Buffer = proof2Data.toBuffer()
   var outputBuffer: Buffer
 
-  if not recover_id_secret(instance.ctx, addr proof1Buffer, addr proof2Buffer, addr outputBuffer):
+  if not recover_id_secret(
+    instance.ctx, addr proof1Buffer, addr proof2Buffer, addr outputBuffer
+  ):
     return err("Failed to recover secret")
 
   if outputBuffer.len != 32:
