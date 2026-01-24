@@ -26,6 +26,7 @@ import ./credentials
 export types, constants, codec, group_manager, nullifier_log, credentials
 # Re-export nim-libp2p types for convenience
 export libp2p_spam.SpamProtection
+export libp2p_spam.EncodedProofData, libp2p_spam.BindingData
 
 logScope:
   topics = "mix-rln-spam-protection"
@@ -248,8 +249,8 @@ proc registerSelf*(
 # SpamProtection implementation
 
 method generateProof*(
-    sp: MixRlnSpamProtection, bindingData: seq[byte]
-): Result[seq[byte], string] {.gcsafe, raises: [].} =
+    sp: MixRlnSpamProtection, bindingData: BindingData
+): Result[EncodedProofData, string] {.gcsafe, raises: [].} =
   ## Generate an RLN proof bound to the given packet data.
   ##
   ## For per-hop generation, bindingData is the outgoing Sphinx packet.
@@ -271,7 +272,7 @@ method generateProof*(
 
   # Generate proof
   let proof = sp.groupManager.generateProof(
-    bindingData, epoch, sp.config.rlnIdentifier, sp.messageIdCounter
+    seq[byte](bindingData), epoch, sp.config.rlnIdentifier, sp.messageIdCounter
   ).valueOr:
     return err("Failed to generate proof: " & error)
 
@@ -352,8 +353,8 @@ proc handleSpamDetected(
 
 method verifyProof*(
     sp: MixRlnSpamProtection,
-    encodedProofData: seq[byte],
-    bindingData: seq[byte],
+    encodedProofData: EncodedProofData,
+    bindingData: BindingData,
 ): Result[bool, string] {.gcsafe, raises: [].} =
   ## Verify an RLN proof and check for spam.
   ##
@@ -387,7 +388,7 @@ method verifyProof*(
 
   # Verify the zkSNARK proof
   let isValid = sp.groupManager.verifyProof(
-    proof, bindingData, sp.config.rlnIdentifier
+    proof, seq[byte](bindingData), sp.config.rlnIdentifier
   ).valueOr:
     return err("Proof verification error: " & error)
 
@@ -407,7 +408,7 @@ method verifyProof*(
     externalNullifier: extNullifier,
   )
 
-  let spamResult = 
+  let spamResult =
     try:
       sp.nullifierLog.checkAndInsert(metadata)
     except KeyError as e:
@@ -462,7 +463,7 @@ proc handleProofMetadata*(sp: MixRlnSpamProtection, data: seq[byte]): RlnResult[
   let broadcast = ProofMetadataBroadcast.decode(data).valueOr:
     return err("Failed to decode proof metadata: " & $error)
 
-  let spamResult = 
+  let spamResult =
     try:
       sp.nullifierLog.handleNetworkMetadata(broadcast)
     except KeyError as e:

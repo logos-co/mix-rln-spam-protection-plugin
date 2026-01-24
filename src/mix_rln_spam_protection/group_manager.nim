@@ -316,8 +316,11 @@ method register*(
     gm: OffchainGroupManager, credentials: IdentityCredential
 ): Future[RlnResult[MembershipIndex]] {.async.} =
   ## Register self with the given credentials.
-  if gm.credentials.isSome:
-    return err("Already registered with credentials")
+  # Check if already registered (by checking if we have a membership index)
+  # Note: credentials may be set during init() for ephemeral mode, so we check
+  # membershipIndex instead to determine if we're actually registered in the tree.
+  if gm.membershipIndex.isSome:
+    return err("Already registered with index " & $gm.membershipIndex.get())
 
   let indexResult = await gm.register(credentials.idCommitment)
   if indexResult.isErr:

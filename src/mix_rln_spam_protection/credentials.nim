@@ -87,15 +87,17 @@ proc encryptCredential(cred: IdentityCredential, password: string): RlnResult[Ke
   let key = deriveKey(password, salt)
   let plaintext = serializeCredential(cred)
 
-  # Pad to block size (16 bytes for AES)
+  # Pad to block size (16 bytes for AES) using PKCS7 padding
+  # IMPORTANT: PKCS7 always adds padding, even if data is block-aligned
+  # If data is N blocks, add a full block of padding (16 bytes of value 0x10)
   let blockSize = 16
-  let paddedLen = ((plaintext.len + blockSize - 1) div blockSize) * blockSize
+  let padLen = blockSize - (plaintext.len mod blockSize)
+  let paddedLen = plaintext.len + padLen
   var paddedPlaintext = newSeq[byte](paddedLen)
   copyMem(addr paddedPlaintext[0], unsafeAddr plaintext[0], plaintext.len)
-  # PKCS7 padding
-  let padLen = byte(paddedLen - plaintext.len)
+  # Fill padding bytes with padding length value (PKCS7)
   for i in plaintext.len ..< paddedLen:
-    paddedPlaintext[i] = if padLen == 0: byte(blockSize) else: padLen
+    paddedPlaintext[i] = byte(padLen)
 
   # Encrypt using AES-256-CBC
   var ciphertext = newSeq[byte](paddedPlaintext.len)
