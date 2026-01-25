@@ -189,7 +189,40 @@ method generateProof*(
   let creds = gm.credentials.get()
   let index = gm.membershipIndex.get()
 
-  gm.rlnInstance.generateRlnProof(creds, index, epoch, rlnIdentifier, signal, messageId)
+  # Get current Merkle root before generating proof
+  let currentRoot = gm.rlnInstance.getMerkleRoot().valueOr:
+    return err("Failed to get current Merkle root: " & error)
+
+  info "Generating RLN proof",
+    signalLen = signal.len,
+    epochLen = epoch.len,
+    rlnIdentifierLen = rlnIdentifier.len,
+    messageId = messageId,
+    membershipIndex = index,
+    currentMerkleRoot = currentRoot.toHex()
+
+  let result = gm.rlnInstance.generateRlnProof(
+    creds, index, epoch, rlnIdentifier, signal, messageId
+  )
+
+  if result.isErr:
+    error "RLN proof generation failed", error = result.error
+    return result
+
+  # Log the root that ended up in the generated proof
+  let generatedProof = result.get()
+  info "RLN proof generated successfully",
+    proofMerkleRoot = generatedProof.merkleRoot.toHex(),
+    currentMerkleRoot = currentRoot.toHex(),
+    rootsMatch = generatedProof.merkleRoot == currentRoot
+
+  if generatedProof.merkleRoot != currentRoot:
+    error "WARNING: Generated proof contains different root than current tree!",
+      proofRoot = generatedProof.merkleRoot.toHex(), currentRoot = currentRoot.toHex()
+
+  return result
+
+  return result
 
 method verifyProof*(
     gm: GroupManager,
@@ -452,20 +485,26 @@ proc getMemberCount*(gm: OffchainGroupManager): int =
 
 proc getMemberIndex*(
     gm: OffchainGroupManager, commitment: IDCommitment
-): Option[MembershipIndex] =
+): Option[MembershipIndex] {.raises: [].} =
   ## Get the index of a member by commitment.
-  if gm.membershipByCommitment.hasKey(commitment):
-    some(gm.membershipByCommitment[commitment])
-  else:
+  try:
+    if gm.membershipByCommitment.hasKey(commitment):
+      some(gm.membershipByCommitment[commitment])
+    else:
+      none(MembershipIndex)
+  except KeyError:
     none(MembershipIndex)
 
 proc getMemberCommitment*(
     gm: OffchainGroupManager, index: MembershipIndex
-): Option[IDCommitment] =
+): Option[IDCommitment] {.raises: [].} =
   ## Get the commitment of a member by index.
-  if gm.membershipByIndex.hasKey(index):
-    some(gm.membershipByIndex[index])
-  else:
+  try:
+    if gm.membershipByIndex.hasKey(index):
+      some(gm.membershipByIndex[index])
+    else:
+      none(IDCommitment)
+  except KeyError:
     none(IDCommitment)
 
 # Tree serialization for bootstrap

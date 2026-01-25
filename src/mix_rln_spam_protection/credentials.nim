@@ -33,7 +33,7 @@ type
     version: int
     salt: seq[byte]
     iv: seq[byte]
-    ciphertext: seq[byte]  # Encrypted IdentityCredential
+    ciphertext: seq[byte] # Encrypted IdentityCredential
     membershipIndex: Option[MembershipIndex]
 
   # Keystore containing multiple credentials
@@ -44,7 +44,9 @@ proc generateCredentials*(): RlnResult[IdentityCredential] =
   ## Generate new random credentials.
   generateMembershipKey()
 
-proc generateCredentialsFromSeed*(seed: openArray[byte]): RlnResult[IdentityCredential] =
+proc generateCredentialsFromSeed*(
+    seed: openArray[byte]
+): RlnResult[IdentityCredential] =
   ## Generate deterministic credentials from a seed.
   generateMembershipKey(seed)
 
@@ -73,7 +75,9 @@ proc deriveKey(password: string, salt: seq[byte]): array[KeySize, byte] =
   let keySeq = pbkdf2(sha2.sha256, password, salt, Pbkdf2Iterations, KeySize)
   copyMem(addr result[0], unsafeAddr keySeq[0], KeySize)
 
-proc encryptCredential(cred: IdentityCredential, password: string): RlnResult[KeystoreEntry] =
+proc encryptCredential(
+    cred: IdentityCredential, password: string
+): RlnResult[KeystoreEntry] =
   ## Encrypt a credential with a password.
   var salt = newSeq[byte](SaltSize)
   var iv = newSeq[byte](IvSize)
@@ -106,15 +110,19 @@ proc encryptCredential(cred: IdentityCredential, password: string): RlnResult[Ke
   ctx.encrypt(paddedPlaintext, ciphertext)
   ctx.clear()
 
-  ok(KeystoreEntry(
-    version: KeystoreVersion,
-    salt: salt,
-    iv: iv,
-    ciphertext: ciphertext,
-    membershipIndex: none(MembershipIndex)
-  ))
+  ok(
+    KeystoreEntry(
+      version: KeystoreVersion,
+      salt: salt,
+      iv: iv,
+      ciphertext: ciphertext,
+      membershipIndex: none(MembershipIndex),
+    )
+  )
 
-proc decryptCredential(entry: KeystoreEntry, password: string): RlnResult[IdentityCredential] =
+proc decryptCredential(
+    entry: KeystoreEntry, password: string
+): RlnResult[IdentityCredential] =
   ## Decrypt a credential from a keystore entry.
   if entry.version != KeystoreVersion:
     return err("Unsupported keystore version: " & $entry.version)
@@ -151,12 +159,13 @@ proc decryptCredential(entry: KeystoreEntry, password: string): RlnResult[Identi
 
 proc entryToJson(entry: KeystoreEntry): JsonNode =
   ## Convert keystore entry to JSON.
-  var node = %*{
-    "version": entry.version,
-    "salt": entry.salt.toHex(),
-    "iv": entry.iv.toHex(),
-    "ciphertext": entry.ciphertext.toHex()
-  }
+  var node =
+    %*{
+      "version": entry.version,
+      "salt": entry.salt.toHex(),
+      "iv": entry.iv.toHex(),
+      "ciphertext": entry.ciphertext.toHex(),
+    }
 
   if entry.membershipIndex.isSome:
     node["membershipIndex"] = %entry.membershipIndex.get()
@@ -165,8 +174,8 @@ proc entryToJson(entry: KeystoreEntry): JsonNode =
 
 proc entryFromJson(node: JsonNode): RlnResult[KeystoreEntry] =
   ## Parse keystore entry from JSON.
-  if not node.hasKey("version") or not node.hasKey("salt") or
-     not node.hasKey("iv") or not node.hasKey("ciphertext"):
+  if not node.hasKey("version") or not node.hasKey("salt") or not node.hasKey("iv") or
+      not node.hasKey("ciphertext"):
     return err("Missing required keystore fields")
 
   let version = node["version"].getInt()
@@ -182,19 +191,20 @@ proc entryFromJson(node: JsonNode): RlnResult[KeystoreEntry] =
     salt: salt,
     iv: iv,
     ciphertext: ciphertext,
-    membershipIndex: none(MembershipIndex)
+    membershipIndex: none(MembershipIndex),
   )
 
   if node.hasKey("membershipIndex"):
-    entry.membershipIndex = some(MembershipIndex(node["membershipIndex"].getBiggestInt()))
+    entry.membershipIndex =
+      some(MembershipIndex(node["membershipIndex"].getBiggestInt()))
 
   ok(entry)
 
 proc saveKeystore*(
-  cred: IdentityCredential,
-  password: string,
-  path: string,
-  membershipIndex: Option[MembershipIndex] = none(MembershipIndex)
+    cred: IdentityCredential,
+    password: string,
+    path: string,
+    membershipIndex: Option[MembershipIndex] = none(MembershipIndex),
 ): RlnResult[void] =
   ## Save a credential to a keystore file.
   var entry = encryptCredential(cred, password).valueOr:
@@ -205,9 +215,7 @@ proc saveKeystore*(
   var entriesJson = newJArray()
   entriesJson.add(entryToJson(entry))
 
-  let json = %*{
-    "keystore": entriesJson
-  }
+  let json = %*{"keystore": entriesJson}
 
   try:
     writeFile(path, $json)
@@ -217,8 +225,7 @@ proc saveKeystore*(
     err("Failed to write keystore: " & e.msg)
 
 proc loadKeystore*(
-  path: string,
-  password: string
+    path: string, password: string
 ): RlnResult[(IdentityCredential, Option[MembershipIndex])] =
   ## Load a credential from a keystore file.
   if not fileExists(path):
@@ -254,10 +261,10 @@ proc loadKeystore*(
   ok((cred, entry.membershipIndex))
 
 proc addToKeystore*(
-  path: string,
-  cred: IdentityCredential,
-  password: string,
-  membershipIndex: Option[MembershipIndex] = none(MembershipIndex)
+    path: string,
+    cred: IdentityCredential,
+    password: string,
+    membershipIndex: Option[MembershipIndex] = none(MembershipIndex),
 ): RlnResult[void] =
   ## Add a credential to an existing keystore file.
   var entriesJson: JsonNode
@@ -288,9 +295,7 @@ proc addToKeystore*(
   entry.membershipIndex = membershipIndex
   entriesJson.add(entryToJson(entry))
 
-  let json = %*{
-    "keystore": entriesJson
-  }
+  let json = %*{"keystore": entriesJson}
 
   try:
     writeFile(path, $json)
@@ -300,8 +305,7 @@ proc addToKeystore*(
     err("Failed to write keystore: " & e.msg)
 
 proc loadOrGenerateCredentials*(
-  keystorePath: string,
-  password: string
+    keystorePath: string, password: string
 ): RlnResult[(IdentityCredential, Option[MembershipIndex], bool)] =
   ## Load credentials from keystore if it exists, otherwise generate new ones.
   ## Returns (credential, membershipIndex, wasGenerated).
@@ -309,7 +313,8 @@ proc loadOrGenerateCredentials*(
   if fileExists(keystorePath):
     let (cred, index) = loadKeystore(keystorePath, password).valueOr:
       return err("Failed to load keystore: " & error)
-    info "Loaded existing credentials", commitmentHex = cred.idCommitment.toHex()[0..15] & "..."
+    info "Loaded existing credentials",
+      commitmentHex = cred.idCommitment.toHex()[0 .. 15] & "..."
     ok((cred, index, false))
   else:
     let cred = generateCredentials().valueOr:
@@ -320,5 +325,6 @@ proc loadOrGenerateCredentials*(
     if saveResult.isErr:
       warn "Failed to save generated credentials", error = saveResult.error
 
-    info "Generated new credentials", commitmentHex = cred.idCommitment.toHex()[0..15] & "..."
+    info "Generated new credentials",
+      commitmentHex = cred.idCommitment.toHex()[0 .. 15] & "..."
     ok((cred, none(MembershipIndex), true))

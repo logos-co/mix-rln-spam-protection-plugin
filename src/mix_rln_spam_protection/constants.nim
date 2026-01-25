@@ -10,15 +10,15 @@ const
     ## Depth of the Merkle tree for membership. Supports 2^20 (~1M) members.
 
   # Cryptographic sizes
-  HashByteSize* = 32
-    ## Size of hash outputs (Poseidon, Keccak256) in bytes.
+  HashByteSize* = 32 ## Size of hash outputs (Poseidon, Keccak256) in bytes.
 
-  ZksnarkProofByteSize* = 128
-    ## Size of compressed zkSNARK proof in bytes.
+  ZksnarkProofByteSize* = 128 ## Size of compressed zkSNARK proof in bytes.
 
-  RateLimitProofByteSize* = 288
-    ## Total size of RateLimitProof: proof(128) + root(32) + epoch(32) +
-    ## shareX(32) + shareY(32) + nullifier(32)
+  RateLimitProofByteSize* = 301
+    ## Total size of protobuf-encoded RateLimitProof.
+    ## Raw data: proof(128) + root(32) + epoch(32) + shareX(32) + shareY(32) + nullifier(32) = 288 bytes
+    ## Protobuf overhead: 6 field tags (6 bytes) + length prefixes (1 byte for 32B fields, 2 bytes for 128B field) = 13 bytes
+    ## Total: 288 + 13 = 301 bytes
     ## Note: rlnIdentifier is NOT included as it's a network-wide constant
 
   # Rate limiting parameters
@@ -30,8 +30,7 @@ const
     ## Maximum allowed epoch gap between message epoch and current epoch.
     ## Messages outside this window are rejected.
 
-  UserMessageLimit* = 100
-    ## Maximum number of messages a member can send per epoch.
+  UserMessageLimit* = 100 ## Maximum number of messages a member can send per epoch.
 
   # Root validation
   AcceptableRootWindowSize* = 50
@@ -54,15 +53,12 @@ const
     ## How often to clean up expired entries from the nullifier log.
 
   # File paths (defaults)
-  DefaultTreePath* = "rln_tree.db"
-    ## Default path for persisting the Merkle tree.
+  DefaultTreePath* = "rln_tree.db" ## Default path for persisting the Merkle tree.
 
   DefaultKeystorePath* = "rln_keystore.json"
     ## Default path for the credentials keystore.
 
   # Zerokit RLN configuration
-  RlnCacheCapacity* = 15000
-    ## Number of Merkle tree nodes to cache in memory.
+  RlnCacheCapacity* = 15000 ## Number of Merkle tree nodes to cache in memory.
 
-  RlnFlushIntervalMs* = 500
-    ## Interval for flushing tree changes to disk.
+  RlnFlushIntervalMs* = 500 ## Interval for flushing tree changes to disk.

@@ -6,12 +6,15 @@
 ## This module closely follows logos-messaging-nim's waku_rln_relay/rln/rln_interface.nim
 ## to ensure compatibility with their zerokit (v0.9.0) integration.
 
-import results
+import results, chronicles
 import nimcrypto/keccak as keccak
 import ./types
 import ./constants
 
 {.push raises: [].}
+
+logScope:
+  topics = "rln interface"
 
 # Buffer struct - matches zerokit FFI interface
 # https://github.com/celo-org/celo-threshold-bls-rs/blob/master/crates/threshold-bls-ffi/src/ffi.rs
@@ -287,37 +290,38 @@ proc generateMembershipKey*(seed: openArray[byte]): RlnResult[IdentityCredential
 proc createRLNInstance*(resourcesPath: string = ""): RlnResult[RLNInstance] =
   ## Creates an RLN instance.
   ## If resourcesPath is empty, uses bundled resources.
+  info "Creating RLN instance", resourcesPath = resourcesPath
   var ctx: ptr RLN
   var success: bool
 
-  if resourcesPath.len == 0:
-    # Use default empty path - pass empty buffer with tree depth
-    var emptyBytes = newSeq[byte](0)
-    var emptyBuffer = emptyBytes.toBuffer()
-    let treeDepth = MerkleTreeDepth.uint
-    {.
-      emit:
-        """
-    extern NIM_BOOL new(unsigned int tree_depth, void* input_buffer, void** ctx);
-    `success` = new(`treeDepth`, &`emptyBuffer`, &`ctx`);
-    """
-    .}
-  else:
-    var pathBytes = newSeq[byte](resourcesPath.len)
-    copyMem(addr pathBytes[0], unsafeAddr resourcesPath[0], resourcesPath.len)
-    var pathBuffer = pathBytes.toBuffer()
-    let treeDepth = MerkleTreeDepth.uint
-    {.
-      emit:
-        """
-    extern NIM_BOOL new(unsigned int tree_depth, void* input_buffer, void** ctx);
-    `success` = new(`treeDepth`, &`pathBuffer`, &`ctx`);
-    """
-    .}
+  # Use JSON config format like waku-rln-relay
+  # "tree_height_/" is a special placeholder that tells zerokit to use bundled resources
+  let folder = if resourcesPath.len == 0: "tree_height_/" else: resourcesPath
+
+  # Create JSON config matching waku-rln-relay format
+  let configJson =
+    "{\"resources_folder\":\"" & folder &
+    "\",\"tree_config\":{\"cache_capacity\":15000,\"mode\":\"high_throughput\",\"compression\":false,\"flush_every_ms\":500}}"
+
+  info "RLN config", config = configJson
+  var configBytes = newSeq[byte](configJson.len)
+  copyMem(addr configBytes[0], unsafeAddr configJson[0], configJson.len)
+  var configBuffer = configBytes.toBuffer()
+  let treeDepth = MerkleTreeDepth.uint
+
+  {.
+    emit:
+      """
+  extern NIM_BOOL new(unsigned int tree_depth, void* input_buffer, void** ctx);
+  `success` = new(`treeDepth`, &`configBuffer`, &`ctx`);
+  """
+  .}
 
   if not success or ctx.isNil:
+    error "Failed to create RLN instance", success = success, ctxIsNil = ctx.isNil
     return err("Failed to create RLN instance")
 
+  info "RLN instance created successfully"
   ok(RLNInstance(ctx: ctx))
 
 # Alias
@@ -327,21 +331,36 @@ proc newRLNInstance*(resourcesPath: string = ""): RlnResult[RLNInstance] =
 proc poseidonHash*(inputs: seq[seq[byte]]): RlnResult[array[32, byte]] =
   ## Poseidon hash of concatenated inputs.
   ## Matches logos-messaging-nim's poseidon wrapper.
+  ## 
+  ## The RLN library expects input format:
+  ## [length<8 bytes LE>][field_element_1<32>][field_element_2<32>]...
   var inputData = newSeq[byte]()
+
+  # Add length prefix (number of field elements as u64 little-endian)
+  let numElements = uint64(inputs.len)
+  var lengthBytes: array[8, byte]
+  copyMem(addr lengthBytes[0], unsafeAddr numElements, 8)
+  inputData.add(lengthBytes)
+
+  # Add each field element
   for input in inputs:
     inputData.add(input)
 
+  info "Computing Poseidon hash", inputLen = inputData.len, numInputs = inputs.len
   var inputBuffer = inputData.toBuffer()
   var outputBuffer: Buffer
 
   if not poseidon(addr inputBuffer, addr outputBuffer, true):
+    error "Poseidon FFI call failed", inputLen = inputData.len
     return err("Poseidon hash failed")
 
   if outputBuffer.len != 32:
+    error "Invalid poseidon output length", outputLen = outputBuffer.len
     return err("Invalid poseidon output length")
 
   var hashResult: array[32, byte]
   copyMem(addr hashResult[0], outputBuffer.`ptr`, 32)
+  info "Poseidon hash computed successfully", outputLen = outputBuffer.len
   ok(hashResult)
 
 proc keccak256Hash*(data: openArray[byte]): RlnResult[array[32, byte]] =
@@ -490,11 +509,21 @@ proc generateRlnProof*(
   # Signal (variable)
   inputData.add(@signal)
 
+  info "Calling generate_proof FFI",
+    inputDataLen = inputData.len,
+    expectedInputSize = 32 + 8 + 32 + 32 + 32 + 8 + signal.len,
+    signalLen = signal.len,
+    memberIndex = memberIndex
+
   var inputBuffer = inputData.toBuffer()
   var outputBuffer: Buffer
 
   if not generate_proof(instance.ctx, addr inputBuffer, addr outputBuffer):
+    error "generate_proof FFI call failed",
+      inputLen = inputData.len, outputBufferLen = outputBuffer.len
     return err("Failed to generate RLN proof")
+
+  info "generate_proof FFI succeeded", outputLen = outputBuffer.len
 
   # Parse output: proof<128> | root<32> | external_nullifier<32> | share_x<32> | share_y<32> | nullifier<32>
   if outputBuffer.len < 288:

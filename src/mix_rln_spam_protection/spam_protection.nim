@@ -256,7 +256,10 @@ method generateProof*(
   ## For per-hop generation, bindingData is the outgoing Sphinx packet.
   ## The proof is generated using the node's credentials and current epoch.
 
+  info "MixRlnSpamProtection.generateProof called", bindingDataLen = bindingData.len
+
   if not sp.isReady():
+    error "Spam protection not ready for proof generation"
     return err("Plugin not ready")
 
   let epoch = currentEpoch()
@@ -268,12 +271,21 @@ method generateProof*(
 
   # Check if we've exceeded message limit
   if sp.messageIdCounter >= uint(sp.config.userMessageLimit):
+    error "Message limit exceeded",
+      counter = sp.messageIdCounter, limit = sp.config.userMessageLimit
     return err("Message limit exceeded for current epoch")
+
+  info "Calling groupManager.generateProof",
+    bindingDataLen = bindingData.len,
+    epochLen = epoch.len,
+    rlnIdentifierLen = sp.config.rlnIdentifier.len,
+    messageId = sp.messageIdCounter
 
   # Generate proof
   let proof = sp.groupManager.generateProof(
     seq[byte](bindingData), epoch, sp.config.rlnIdentifier, sp.messageIdCounter
   ).valueOr:
+    error "GroupManager proof generation failed", error = error
     return err("Failed to generate proof: " & error)
 
   sp.messageIdCounter += 1
@@ -281,10 +293,20 @@ method generateProof*(
   # Serialize proof using protobuf
   let serialized = proof.toBytes()
 
-  debug "Generated RLN proof",
+  info "Generated RLN proof successfully",
     epoch = epochToUint64(epoch),
     messageId = sp.messageIdCounter - 1,
+    proofLen = serialized.len,
+    declaredProofSize = sp.proofSize,
+    actualProofSize = serialized.len,
     nullifier = proof.nullifier[0 .. 7].toHex() & "..."
+
+  # Verify the declared proofSize matches actual size
+  if serialized.len != sp.proofSize:
+    error "MISMATCH: Declared proofSize does not match actual protobuf-encoded size",
+      declared = sp.proofSize,
+      actual = serialized.len,
+      difference = serialized.len - sp.proofSize
 
   ok(serialized)
 
@@ -382,8 +404,20 @@ method verifyProof*(
     return ok(false)
 
   # Check Merkle root validity
+  let validRoots = sp.groupManager.rootTracker.getValidRoots()
+  let currentRoot = sp.groupManager.rlnInstance.getMerkleRoot().valueOr:
+    return err("Failed to get current Merkle root: " & error)
+
   if not sp.groupManager.validateRoot(proof.merkleRoot):
-    debug "Proof rejected: invalid Merkle root"
+    error "Proof rejected: invalid Merkle root",
+      proofRoot = proof.merkleRoot.toHex(),
+      currentRoot = currentRoot.toHex(),
+      numValidRoots = validRoots.len,
+      validRootsPreview =
+        if validRoots.len > 0:
+          validRoots[0][0 .. 7].toHex() & "..."
+        else:
+          "none"
     return ok(false)
 
   # Verify the zkSNARK proof
@@ -485,7 +519,16 @@ proc saveTree*(sp: MixRlnSpamProtection): RlnResult[void] =
 
 proc loadTree*(sp: MixRlnSpamProtection): RlnResult[void] =
   ## Load tree state from file.
-  sp.groupManager.loadTreeFromFile(sp.config.treePath)
+  let result = sp.groupManager.loadTreeFromFile(sp.config.treePath)
+  if result.isOk:
+    let currentRoot = sp.groupManager.rlnInstance.getMerkleRoot().valueOr:
+      return err("Failed to get Merkle root after loading tree: " & error)
+    let memberCount = sp.groupManager.getMemberCount()
+    info "Tree loaded from file",
+      treePath = sp.config.treePath,
+      memberCount = memberCount,
+      currentRoot = currentRoot.toHex()
+  result
 
 # Utility accessors
 
