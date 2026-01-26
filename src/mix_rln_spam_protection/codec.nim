@@ -15,16 +15,6 @@
 ##     bytes nullifier = 6;
 ##   }
 ##
-##   message ExternalNullifier {
-##     bytes internal_nullifier = 1;
-##     repeated bytes x_shares = 2;
-##     repeated bytes y_shares = 3;
-##   }
-##
-##   message MessagingMetadata {
-##     repeated ExternalNullifier nullifiers = 1;
-##   }
-##
 ##   message MembershipUpdate {
 ##     uint32 action = 1;
 ##     bytes id_commitment = 2;
@@ -101,94 +91,6 @@ proc decode*(T: type RateLimitProof, buffer: seq[byte]): ProtobufResult[T] =
   copyMem(addr proof.nullifier[0], addr nullifier[0], HashByteSize)
 
   ok(proof)
-
-# ExternalNullifier encoding/decoding (for MessagingMetadata)
-
-type
-  ExternalNullifierProto* = object
-    ## Protobuf representation matching spec's ExternalNullifier message.
-    ## Used for broadcasting proof metadata across the coordination layer.
-    internalNullifier*: Nullifier
-    xShares*: seq[ShareX]
-    yShares*: seq[ShareY]
-
-proc encode*(extNull: ExternalNullifierProto): ProtoBuffer =
-  ## Encode an ExternalNullifierProto to protobuf.
-  var buf = initProtoBuffer()
-
-  buf.write3(1, @(extNull.internalNullifier))
-  for x in extNull.xShares:
-    buf.write3(2, @x)
-  for y in extNull.yShares:
-    buf.write3(3, @y)
-  buf.finish3()
-
-  buf
-
-proc decode*(T: type ExternalNullifierProto, buffer: seq[byte]): ProtobufResult[T] =
-  ## Decode protobuf bytes to an ExternalNullifierProto.
-  var extNull: ExternalNullifierProto
-  let pb = initProtoBuffer(buffer)
-
-  var internalNullifier: seq[byte]
-  if not ?pb.getField(1, internalNullifier):
-    return err(ProtobufError.missingRequiredField("internal_nullifier"))
-  if internalNullifier.len != HashByteSize:
-    return err(ProtobufError.invalidLengthField("internal_nullifier"))
-  copyMem(addr extNull.internalNullifier[0], addr internalNullifier[0], HashByteSize)
-
-  # Get repeated x_shares
-  var xSharesBytes: seq[seq[byte]]
-  discard ?pb.getRepeatedField(2, xSharesBytes)
-  for xBytes in xSharesBytes:
-    if xBytes.len != HashByteSize:
-      return err(ProtobufError.invalidLengthField("x_shares"))
-    var x: ShareX
-    copyMem(addr x[0], unsafeAddr xBytes[0], HashByteSize)
-    extNull.xShares.add(x)
-
-  # Get repeated y_shares
-  var ySharesBytes: seq[seq[byte]]
-  discard ?pb.getRepeatedField(3, ySharesBytes)
-  for yBytes in ySharesBytes:
-    if yBytes.len != HashByteSize:
-      return err(ProtobufError.invalidLengthField("y_shares"))
-    var y: ShareY
-    copyMem(addr y[0], unsafeAddr yBytes[0], HashByteSize)
-    extNull.yShares.add(y)
-
-  ok(extNull)
-
-# MessagingMetadata encoding/decoding
-
-type
-  MessagingMetadata* = object
-    ## Protobuf representation matching spec's MessagingMetadata message.
-    ## Wrapper message collecting multiple external nullifiers for broadcast.
-    nullifiers*: seq[ExternalNullifierProto]
-
-proc encode*(meta: MessagingMetadata): ProtoBuffer =
-  ## Encode a MessagingMetadata to protobuf.
-  var buf = initProtoBuffer()
-
-  for nullifier in meta.nullifiers:
-    buf.write3(1, nullifier.encode().buffer)
-  buf.finish3()
-
-  buf
-
-proc decode*(T: type MessagingMetadata, buffer: seq[byte]): ProtobufResult[T] =
-  ## Decode protobuf bytes to a MessagingMetadata.
-  var meta: MessagingMetadata
-  let pb = initProtoBuffer(buffer)
-
-  var nullifierBuffers: seq[seq[byte]]
-  discard ?pb.getRepeatedField(1, nullifierBuffers)
-  for nullifierBuf in nullifierBuffers:
-    let nullifier = ?ExternalNullifierProto.decode(nullifierBuf)
-    meta.nullifiers.add(nullifier)
-
-  ok(meta)
 
 # MembershipUpdate encoding/decoding
 
@@ -301,7 +203,3 @@ proc toBytes*(update: MembershipUpdate): seq[byte] =
 proc toBytes*(broadcast: ProofMetadataBroadcast): seq[byte] =
   ## Serialize a ProofMetadataBroadcast to bytes using protobuf.
   broadcast.encode().buffer
-
-proc toBytes*(meta: MessagingMetadata): seq[byte] =
-  ## Serialize a MessagingMetadata to bytes using protobuf.
-  meta.encode().buffer

@@ -260,50 +260,6 @@ proc loadKeystore*(
   debug "Loaded keystore", path = path, hasIndex = entry.membershipIndex.isSome
   ok((cred, entry.membershipIndex))
 
-proc addToKeystore*(
-    path: string,
-    cred: IdentityCredential,
-    password: string,
-    membershipIndex: Option[MembershipIndex] = none(MembershipIndex),
-): RlnResult[void] =
-  ## Add a credential to an existing keystore file.
-  var entriesJson: JsonNode
-
-  if fileExists(path):
-    let content =
-      try:
-        readFile(path)
-      except IOError as e:
-        return err("Failed to read keystore: " & e.msg)
-
-    let json =
-      try:
-        parseJson(content)
-      except JsonParsingError as e:
-        return err("Failed to parse keystore JSON: " & e.msg)
-
-    if json.hasKey("keystore") and json["keystore"].kind == JArray:
-      entriesJson = json["keystore"]
-    else:
-      entriesJson = newJArray()
-  else:
-    entriesJson = newJArray()
-
-  var entry = encryptCredential(cred, password).valueOr:
-    return err("Failed to encrypt credential: " & error)
-
-  entry.membershipIndex = membershipIndex
-  entriesJson.add(entryToJson(entry))
-
-  let json = %*{"keystore": entriesJson}
-
-  try:
-    writeFile(path, $json)
-    debug "Added credential to keystore", path = path
-    ok()
-  except IOError as e:
-    err("Failed to write keystore: " & e.msg)
-
 proc loadOrGenerateCredentials*(
     keystorePath: string, password: string
 ): RlnResult[(IdentityCredential, Option[MembershipIndex], bool)] =

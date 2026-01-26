@@ -102,15 +102,6 @@ proc containsRoot*(tracker: MerkleRootTracker, root: MerkleNode): bool =
   ## Check if a root is in the valid window. O(1) lookup.
   root in tracker.rootSet
 
-proc indexOfRoot*(tracker: MerkleRootTracker, root: MerkleNode): int =
-  ## Get the index of a root in the valid window, or -1 if not found.
-  var idx = 0
-  for r in tracker.validRoots:
-    if r == root:
-      return idx
-    inc idx
-  -1
-
 proc getValidRoots*(tracker: MerkleRootTracker): seq[MerkleNode] =
   ## Get all valid roots.
   result = newSeq[MerkleNode](tracker.validRoots.len)

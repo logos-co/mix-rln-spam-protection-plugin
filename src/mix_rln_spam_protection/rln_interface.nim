@@ -372,14 +372,6 @@ proc poseidonHash*(inputs: seq[seq[byte]]): RlnResult[array[32, byte]] =
   trace "Poseidon hash computed successfully", outputLen = outputBuffer.len
   ok(hashResult)
 
-proc keccak256Hash*(data: openArray[byte]): RlnResult[array[32, byte]] =
-  ## Compute Keccak256 hash of data using nimcrypto.
-  ## Note: zerokit doesn't export keccak256, so we use nimcrypto directly.
-  let hashDigest = keccak.keccak256.digest(data)
-  var hashResult: array[32, byte]
-  copyMem(addr hashResult[0], unsafeAddr hashDigest.data[0], 32)
-  ok(hashResult)
-
 proc computeExternalNullifier*(
     epoch: Epoch, rlnIdentifier: RlnIdentifier
 ): RlnResult[ExternalNullifier] =
@@ -471,24 +463,6 @@ proc insertMember*(
     return err("Failed to insert member")
 
   ok(MembershipIndex(currentIndex))
-
-proc insertMembers*(
-    instance: RLNInstance, startIndex: MembershipIndex, commitments: seq[IDCommitment]
-): RlnResult[void] =
-  ## Inserts multiple members starting at the given index.
-  if commitments.len == 0:
-    return ok()
-
-  var inputData = newSeq[byte](commitments.len * HashByteSize)
-  for i, commitment in commitments:
-    copyMem(addr inputData[i * HashByteSize], unsafeAddr commitment[0], HashByteSize)
-
-  var inputBuffer = inputData.toBuffer()
-
-  if not set_leaves_from(instance.ctx, uint(startIndex), addr inputBuffer):
-    return err("Failed to insert members")
-
-  ok()
 
 proc removeMember*(instance: RLNInstance, index: MembershipIndex): RlnResult[void] =
   ## Removes a member from the Merkle tree.
@@ -687,114 +661,6 @@ proc generateRlnProofWithWitness*(
     proofMerkleRoot = proof.merkleRoot.toHex(),
     currentMerkleRoot = currentRoot.toHex(),
     rootsMatch = proof.merkleRoot == currentRoot
-
-  ok(proof)
-
-proc generateRlnProof*(
-    instance: RLNInstance,
-    credential: IdentityCredential,
-    memberIndex: MembershipIndex,
-    epoch: Epoch,
-    rlnIdentifier: RlnIdentifier,
-    signal: openArray[byte],
-    messageId: uint = 0,
-): RlnResult[RateLimitProof] =
-  ## Generate an RLN proof for a message using the standard generate_proof FFI.
-  ## This lets zerokit handle Merkle proof retrieval internally.
-  ## Note: generateRlnProofWithWitness is preferred for reliable Merkle proof handling.
-
-  # Flush tree to ensure internal state is synced
-  discard flush(instance.ctx)
-
-  # Compute external nullifier = Poseidon(epoch, rlnIdentifier)
-  let externalNullifier = poseidonHash(@[@epoch, @rlnIdentifier]).valueOr:
-    return err("Failed to compute external nullifier: " & error)
-
-  # Serialize input for standard generate_proof
-  # Format: identity_secret<32> | identity_index<8> | user_message_limit<32> | message_id<32> | external_nullifier<32> | signal_len<8> | signal<var>
-  var inputData = newSeq[byte]()
-
-  # Identity secret (use identity secret hash, not trapdoor - matching waku)
-  # The RLN circuit expects idSecretHash = Poseidon(idTrapdoor, idNullifier)
-  inputData.add(@(credential.idSecretHash))
-
-  # Member index (8 bytes, little-endian)
-  let indexBytes = toBytes(uint64(memberIndex), Endianness.littleEndian)
-  inputData.add(@indexBytes)
-
-  # User message limit (32 bytes, little-endian)
-  var userMsgLimit: array[32, byte]
-  let limitBytes = toBytes(uint64(UserMessageLimit), Endianness.littleEndian)
-  discard userMsgLimit.copyFrom(limitBytes)
-  inputData.add(@userMsgLimit)
-
-  # Message ID (32 bytes, little-endian)
-  var msgIdBytes: array[32, byte]
-  let msgIdEncoded = toBytes(uint64(messageId), Endianness.littleEndian)
-  discard msgIdBytes.copyFrom(msgIdEncoded)
-  inputData.add(@msgIdBytes)
-
-  # External nullifier (32 bytes)
-  inputData.add(@externalNullifier)
-
-  # Signal length (8 bytes, little-endian)
-  let signalLenBytes = toBytes(uint64(signal.len), Endianness.littleEndian)
-  inputData.add(@signalLenBytes)
-
-  # Signal data
-  if signal.len > 0:
-    inputData.add(@signal)
-
-  trace "Calling generate_proof FFI",
-    inputLen = inputData.len, signalLen = signal.len, memberIndex = memberIndex
-
-  var inputBuffer = inputData.toBuffer()
-  var outputBuffer: Buffer
-
-  if not generate_proof(instance.ctx, addr inputBuffer, addr outputBuffer):
-    error "generate_proof FFI call failed",
-      inputLen = inputData.len, outputBufferLen = outputBuffer.len
-    return err("Failed to generate RLN proof")
-
-  trace "generate_proof FFI succeeded", outputLen = outputBuffer.len
-
-  # Parse output: proof<128> | root<32> | external_nullifier<32> | share_x<32> | share_y<32> | nullifier<32>
-  if outputBuffer.len < 288:
-    return err("Invalid proof output length: " & $outputBuffer.len)
-
-  let outputData = cast[ptr UncheckedArray[byte]](outputBuffer.`ptr`)
-
-  var proof: RateLimitProof
-  var offset = 0
-
-  # zkSNARK proof (128 bytes)
-  for i in 0 ..< 128:
-    proof.proof[i] = outputData[offset + i]
-  offset += 128
-
-  # Merkle root (32 bytes)
-  for i in 0 ..< 32:
-    proof.merkleRoot[i] = outputData[offset + i]
-  offset += 32
-
-  # External nullifier / epoch (32 bytes) - we store epoch in proof
-  for i in 0 ..< 32:
-    proof.epoch[i] = epoch[i]
-  offset += 32
-
-  # Share X (32 bytes)
-  for i in 0 ..< 32:
-    proof.shareX[i] = outputData[offset + i]
-  offset += 32
-
-  # Share Y (32 bytes)
-  for i in 0 ..< 32:
-    proof.shareY[i] = outputData[offset + i]
-  offset += 32
-
-  # Nullifier (32 bytes)
-  for i in 0 ..< 32:
-    proof.nullifier[i] = outputData[offset + i]
 
   ok(proof)
 

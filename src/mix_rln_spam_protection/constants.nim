@@ -57,8 +57,3 @@ const
 
   DefaultKeystorePath* = "rln_keystore.json"
     ## Default path for the credentials keystore.
-
-  # Zerokit RLN configuration
-  RlnCacheCapacity* = 15000 ## Number of Merkle tree nodes to cache in memory.
-
-  RlnFlushIntervalMs* = 500 ## Interval for flushing tree changes to disk.

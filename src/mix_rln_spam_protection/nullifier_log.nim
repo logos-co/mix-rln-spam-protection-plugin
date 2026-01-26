@@ -175,56 +175,6 @@ proc checkAndInsert*(
   nl.log[extNullifier][nullifier].add(entry)
   debug "Nullifier entry added", nullifier = nullifier
 
-proc hasDuplicate*(nl: NullifierLog, metadata: ProofMetadata): bool =
-  ## Check if exact duplicate exists without inserting.
-  let extNullifier = metadata.externalNullifier
-  let nullifier = metadata.nullifier
-
-  if not nl.log.hasKey(extNullifier):
-    return false
-
-  if not nl.log[extNullifier].hasKey(nullifier):
-    return false
-
-  for entry in nl.log[extNullifier][nullifier]:
-    if entry.metadata.shareX == metadata.shareX and
-        entry.metadata.shareY == metadata.shareY:
-      return true
-
-  false
-
-proc hasNullifier*(
-    nl: NullifierLog, extNullifier: ExternalNullifier, nullifier: Nullifier
-): bool =
-  ## Check if any entry exists for the given nullifier.
-  if not nl.log.hasKey(extNullifier):
-    return false
-  nl.log[extNullifier].hasKey(nullifier)
-
-proc getEntries*(
-    nl: NullifierLog, extNullifier: ExternalNullifier, nullifier: Nullifier
-): seq[NullifierEntry] =
-  ## Get all entries for a nullifier.
-  if not nl.log.hasKey(extNullifier):
-    return @[]
-
-  if not nl.log[extNullifier].hasKey(nullifier):
-    return @[]
-
-  nl.log[extNullifier][nullifier]
-
-proc getEntryCount*(nl: NullifierLog): int =
-  ## Get total number of entries across all epochs.
-  result = 0
-  for extNullifier, epochLog in nl.log:
-    for nullifier, entries in epochLog:
-      result += entries.len
-
-proc clear*(nl: NullifierLog) =
-  ## Clear all entries from the log.
-  nl.log.clear()
-  debug "Nullifier log cleared"
-
 # Handle incoming proof metadata from network coordination
 proc handleNetworkMetadata*(
     nl: NullifierLog, broadcast: ProofMetadataBroadcast

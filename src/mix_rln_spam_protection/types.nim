@@ -104,14 +104,6 @@ type
     proc(contentTopic: string, data: seq[byte]): Future[void] {.gcsafe, raises: [].}
     ## Callback for publishing messages to logos-messaging.
 
-  MembershipUpdateHandler* =
-    proc(update: MembershipUpdate): Future[void] {.gcsafe, raises: [].}
-    ## Handler called when membership updates are received.
-
-  ProofMetadataHandler* =
-    proc(metadata: ProofMetadataBroadcast): Future[void] {.gcsafe, raises: [].}
-    ## Handler called when proof metadata is received from network.
-
   # RLN Witness input for explicit Merkle proof-based proof generation
   Field* = array[32, byte] ## 32-byte field element representation (256 bits).
 
@@ -247,13 +239,4 @@ proc seqToField*(s: openArray[byte]): Field =
   let len = min(s.len, 32)
   for i in 0 ..< len:
     output[i] = s[i]
-  return output
-
-proc uint64ToIndex*(index: MembershipIndex, depth: int): seq[byte] =
-  ## Convert a membership index to a bit path for Merkle tree traversal.
-  ## Returns LSB-first bit decomposition of the index.
-  ## Each byte is 0 (left) or 1 (right) for the tree traversal.
-  var output = newSeq[byte](depth)
-  for i in 0 ..< depth:
-    output[i] = byte((index shr i) and 1)
   return output
