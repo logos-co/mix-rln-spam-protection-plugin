@@ -540,18 +540,19 @@ proc restoreCredentialsToTree*(sp: MixRlnSpamProtection): RlnResult[void] =
   if sp.groupManager.membershipIndex.isSome and sp.groupManager.credentials.isSome:
     let cred = sp.groupManager.credentials.get()
     let index = sp.groupManager.membershipIndex.get()
-    
+
     # Check if our member is already in the tree
     if not sp.groupManager.hasMember(cred.idCommitment):
-      let restoreRes = sp.groupManager.restoreMemberFromKeystore(cred.idCommitment, index)
+      let restoreRes =
+        sp.groupManager.restoreMemberFromKeystore(cred.idCommitment, index)
       if restoreRes.isErr:
         return err("Failed to restore member from keystore: " & restoreRes.error)
       info "Restored credentials to tree", index = index
-  
+
   # Always flush after tree operations to ensure Zerokit internal cache is synced
   if not flush(sp.groupManager.rlnInstance.ctx):
     return err("Failed to flush tree after restoring credentials")
-  
+
   ok()
 
 # Utility accessors

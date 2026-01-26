@@ -17,8 +17,7 @@ type
   Nullifier* = array[HashByteSize, byte]
     ## 32-byte nullifier derived from epoch and member's secret key.
 
-  Epoch* = array[HashByteSize, byte]
-    ## 32-byte epoch value representing a time window.
+  Epoch* = array[HashByteSize, byte] ## 32-byte epoch value representing a time window.
 
   RlnIdentifier* = array[HashByteSize, byte]
     ## 32-byte application-specific RLN identifier.
@@ -26,11 +25,9 @@ type
   ExternalNullifier* = array[HashByteSize, byte]
     ## 32-byte external nullifier: Poseidon(epoch, rln_identifier).
 
-  ShareX* = array[HashByteSize, byte]
-    ## 32-byte Shamir secret share X coordinate.
+  ShareX* = array[HashByteSize, byte] ## 32-byte Shamir secret share X coordinate.
 
-  ShareY* = array[HashByteSize, byte]
-    ## 32-byte Shamir secret share Y coordinate.
+  ShareY* = array[HashByteSize, byte] ## 32-byte Shamir secret share Y coordinate.
 
   IDCommitment* = array[HashByteSize, byte]
     ## 32-byte identity commitment: Poseidon(identity_secret).
@@ -44,15 +41,12 @@ type
   IDNullifier* = array[HashByteSize, byte]
     ## 32-byte identity nullifier (component of credential).
 
-  ZkProof* = array[ZksnarkProofByteSize, byte]
-    ## 128-byte compressed zkSNARK proof.
+  ZkProof* = array[ZksnarkProofByteSize, byte] ## 128-byte compressed zkSNARK proof.
 
-  MembershipIndex* = uint64
-    ## Index of a member in the Merkle tree (0-based).
+  MembershipIndex* = uint64 ## Index of a member in the Merkle tree (0-based).
 
   # Identity and credentials
-  IdentityCredential* = object
-    ## Complete identity credential for an RLN member.
+  IdentityCredential* = object ## Complete identity credential for an RLN member.
     idTrapdoor*: IDTrapdoor
     idNullifier*: IDNullifier
     idSecretHash*: IDSecretHash
@@ -63,16 +57,15 @@ type
     ## Complete RLN proof attached to messages.
     ## Note: rlnIdentifier is NOT included as it's a network-wide constant
     ## and can be derived from configuration.
-    proof*: ZkProof           ## 128 bytes: zkSNARK proof
-    merkleRoot*: MerkleNode   ## 32 bytes: Merkle tree root used for proof
-    epoch*: Epoch             ## 32 bytes: epoch when proof was generated
-    shareX*: ShareX           ## 32 bytes: Shamir share X
-    shareY*: ShareY           ## 32 bytes: Shamir share Y
-    nullifier*: Nullifier     ## 32 bytes: message nullifier
+    proof*: ZkProof ## 128 bytes: zkSNARK proof
+    merkleRoot*: MerkleNode ## 32 bytes: Merkle tree root used for proof
+    epoch*: Epoch ## 32 bytes: epoch when proof was generated
+    shareX*: ShareX ## 32 bytes: Shamir share X
+    shareY*: ShareY ## 32 bytes: Shamir share Y
+    nullifier*: Nullifier ## 32 bytes: message nullifier
 
   # Proof metadata for spam detection
-  ProofMetadata* = object
-    ## Extracted metadata from a proof for spam detection.
+  ProofMetadata* = object ## Extracted metadata from a proof for spam detection.
     nullifier*: Nullifier
     shareX*: ShareX
     shareY*: ShareY
@@ -81,10 +74,10 @@ type
   # Message validation result
   MessageValidationResult* = enum
     ## Result of validating a message's RLN proof.
-    Valid       ## Proof is valid and message should be processed
-    Invalid     ## Proof is invalid (wrong proof, bad epoch, etc.)
-    Spam        ## Spam detected (double signaling)
-    Duplicate   ## Duplicate message (same proof seen before)
+    Valid ## Proof is valid and message should be processed
+    Invalid ## Proof is invalid (wrong proof, bad epoch, etc.)
+    Spam ## Spam detected (double signaling)
+    Duplicate ## Duplicate message (same proof seen before)
 
   # Membership update actions
   MembershipAction* = enum
@@ -93,15 +86,13 @@ type
     Remove
 
   # Membership update message (for coordination layer)
-  MembershipUpdate* = object
-    ## Message broadcast on membership content topic.
+  MembershipUpdate* = object ## Message broadcast on membership content topic.
     action*: MembershipAction
     idCommitment*: IDCommitment
     index*: MembershipIndex
 
   # Proof metadata broadcast message (for coordination layer)
-  ProofMetadataBroadcast* = object
-    ## Message broadcast on proof metadata content topic.
+  ProofMetadataBroadcast* = object ## Message broadcast on proof metadata content topic.
     nullifier*: Nullifier
     shareX*: ShareX
     shareY*: ShareY
@@ -109,50 +100,49 @@ type
     epoch*: Epoch
 
   # Callback types for coordination layer integration
-  PublishCallback* = proc(contentTopic: string, data: seq[byte]): Future[void] {.gcsafe, raises: [].}
+  PublishCallback* =
+    proc(contentTopic: string, data: seq[byte]): Future[void] {.gcsafe, raises: [].}
     ## Callback for publishing messages to logos-messaging.
 
-  MembershipUpdateHandler* = proc(update: MembershipUpdate): Future[void] {.gcsafe, raises: [].}
+  MembershipUpdateHandler* =
+    proc(update: MembershipUpdate): Future[void] {.gcsafe, raises: [].}
     ## Handler called when membership updates are received.
 
-  ProofMetadataHandler* = proc(metadata: ProofMetadataBroadcast): Future[void] {.gcsafe, raises: [].}
+  ProofMetadataHandler* =
+    proc(metadata: ProofMetadataBroadcast): Future[void] {.gcsafe, raises: [].}
     ## Handler called when proof metadata is received from network.
 
   # RLN Witness input for explicit Merkle proof-based proof generation
-  Field* = array[32, byte]
-    ## 32-byte field element representation (256 bits).
-  
+  Field* = array[32, byte] ## 32-byte field element representation (256 bits).
+
   RLNWitnessInput* = object
     ## Input structure for generate_proof_with_witness FFI.
     ## Contains explicit Merkle proof instead of relying on zerokit's internal cache.
     identity_secret*: Field
     user_message_limit*: Field
     message_id*: Field
-    path_elements*: seq[byte]       ## Concatenated 32-byte Merkle path elements
+    path_elements*: seq[byte] ## Concatenated 32-byte Merkle path elements
     identity_path_index*: seq[byte] ## Bit path (LSB-first) through Merkle tree
-    x*: Field                       ## Keccak256 hash of the signal
+    x*: Field ## Keccak256 hash of the signal
     external_nullifier*: Field
 
   # Spam handler callback
   SpamHandler* = proc(
-    proof: RateLimitProof,
-    recoveredSecret: IDSecretHash,
-    memberIndex: MembershipIndex
+    proof: RateLimitProof, recoveredSecret: IDSecretHash, memberIndex: MembershipIndex
   ): Future[void] {.gcsafe, raises: [].}
     ## Handler called when spam is detected.
     ## Receives the offending proof, recovered secret key, and member index.
 
   # Result types
-  RlnResult*[T] = Result[T, string]
-    ## Generic result type for RLN operations.
+  RlnResult*[T] = Result[T, string] ## Generic result type for RLN operations.
 
   # Plugin state
   PluginState* = enum
     ## State of the spam protection plugin.
-    Uninitialized  ## Plugin created but not started
-    Syncing        ## Waiting for initial membership sync
-    Ready          ## Plugin is ready for proof generation/verification
-    Stopped        ## Plugin has been stopped
+    Uninitialized ## Plugin created but not started
+    Syncing ## Waiting for initial membership sync
+    Ready ## Plugin is ready for proof generation/verification
+    Stopped ## Plugin has been stopped
 
 # Helper functions for epoch calculation
 
@@ -180,14 +170,10 @@ proc currentEpoch*(): Epoch =
 
 proc epochToUint64*(epoch: Epoch): uint64 =
   ## Convert an epoch to its numeric value.
-  result = uint64(epoch[0]) or
-           (uint64(epoch[1]) shl 8) or
-           (uint64(epoch[2]) shl 16) or
-           (uint64(epoch[3]) shl 24) or
-           (uint64(epoch[4]) shl 32) or
-           (uint64(epoch[5]) shl 40) or
-           (uint64(epoch[6]) shl 48) or
-           (uint64(epoch[7]) shl 56)
+  result =
+    uint64(epoch[0]) or (uint64(epoch[1]) shl 8) or (uint64(epoch[2]) shl 16) or
+    (uint64(epoch[3]) shl 24) or (uint64(epoch[4]) shl 32) or (uint64(epoch[5]) shl 40) or
+    (uint64(epoch[6]) shl 48) or (uint64(epoch[7]) shl 56)
 
 proc epochDiff*(e1, e2: Epoch): int64 =
   ## Calculate the difference between two epochs.
@@ -197,7 +183,6 @@ proc isEpochValid*(msgEpoch: Epoch, currentEpoch: Epoch): bool =
   ## Check if a message epoch is within the acceptable gap.
   let diff = abs(epochDiff(currentEpoch, msgEpoch))
   diff <= MaxEpochGap
-
 
 # Hex conversion utilities (shared across modules)
 
@@ -220,16 +205,24 @@ proc fromHex*(hex: string): seq[byte] =
     let lo = hex[i * 2 + 1]
 
     let hiVal =
-      if hi >= '0' and hi <= '9': ord(hi) - ord('0')
-      elif hi >= 'a' and hi <= 'f': ord(hi) - ord('a') + 10
-      elif hi >= 'A' and hi <= 'F': ord(hi) - ord('A') + 10
-      else: return @[]
+      if hi >= '0' and hi <= '9':
+        ord(hi) - ord('0')
+      elif hi >= 'a' and hi <= 'f':
+        ord(hi) - ord('a') + 10
+      elif hi >= 'A' and hi <= 'F':
+        ord(hi) - ord('A') + 10
+      else:
+        return @[]
 
     let loVal =
-      if lo >= '0' and lo <= '9': ord(lo) - ord('0')
-      elif lo >= 'a' and lo <= 'f': ord(lo) - ord('a') + 10
-      elif lo >= 'A' and lo <= 'F': ord(lo) - ord('A') + 10
-      else: return @[]
+      if lo >= '0' and lo <= '9':
+        ord(lo) - ord('0')
+      elif lo >= 'a' and lo <= 'f':
+        ord(lo) - ord('a') + 10
+      elif lo >= 'A' and lo <= 'F':
+        ord(lo) - ord('A') + 10
+      else:
+        return @[]
 
     result[i] = byte((hiVal shl 4) or loVal)
 

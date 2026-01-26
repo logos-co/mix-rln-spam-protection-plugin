@@ -192,19 +192,21 @@ method generateProof*(
   info "Generating proof with credentials",
     membershipIndex = index,
     commitment = creds.idCommitment.toHex(),
-    idSecretHash = creds.idSecretHash.toHex()[0..15] & "...",
-    idTrapdoor = creds.idTrapdoor.toHex()[0..15] & "..."
+    idSecretHash = creds.idSecretHash.toHex()[0 .. 15] & "...",
+    idTrapdoor = creds.idTrapdoor.toHex()[0 .. 15] & "..."
 
   # Flush tree to ensure internal state is synced
   if not flush(gm.rlnInstance.ctx):
     return err("Failed to flush tree before proof generation")
-  
+
   # Verify the tree has the expected rate commitment at our index
   # Tree stores rate_commitment = Poseidon(id_commitment, user_message_limit), NOT id_commitment
   let treeCommitment = gm.rlnInstance.getLeaf(index).valueOr:
     return err("Failed to get leaf at membership index: " & error)
 
-  let expectedRateCommitment = computeRateCommitment(creds.idCommitment, UserMessageLimit).valueOr:
+  let expectedRateCommitment = computeRateCommitment(
+    creds.idCommitment, UserMessageLimit
+  ).valueOr:
     return err("Failed to compute expected rate commitment: " & error)
 
   info "Tree state verification before proof generation",
@@ -222,7 +224,7 @@ method generateProof*(
     # 1. Wrong index stored
     # 2. Tree loaded incorrectly
     # 3. Tree was modified after registration
-  
+
   # Get current Merkle root before generating proof
   let currentRoot = gm.rlnInstance.getMerkleRoot().valueOr:
     return err("Failed to get current Merkle root: " & error)
@@ -403,7 +405,7 @@ method register*(
   # Update local tracking
   gm.membershipByCommitment[commitment] = index
   gm.membershipByIndex[index] = commitment
-  
+
   info "Member added to local tables",
     index = index,
     newMemberCount = gm.membershipByIndex.len,
@@ -712,7 +714,8 @@ proc loadTreeSnapshot*(gm: OffchainGroupManager, data: seq[byte]): RlnResult[voi
       return err("Failed to compute rate commitment: " & error)
 
     # Insert into RLN tree at the correct index
-    let insertResult = gm.rlnInstance.insertMemberAt(MembershipIndex(index), rateCommitment)
+    let insertResult =
+      gm.rlnInstance.insertMemberAt(MembershipIndex(index), rateCommitment)
     if insertResult.isErr:
       error "Failed to insert member from snapshot",
         index = index, error = insertResult.error
@@ -757,34 +760,36 @@ proc loadTreeFromFile*(gm: OffchainGroupManager, path: string): RlnResult[void] 
     let loadResult = gm.loadTreeSnapshot(data)
     if loadResult.isErr:
       return loadResult
-    
+
     # Flush the tree after loading to ensure internal cache is synced
     # Loading calls insertMemberAt() for each member, which modifies the tree
     if not flush(gm.rlnInstance.ctx):
       return err("Failed to flush tree after loading")
-    
+
     # Get root immediately after loading to verify tree state
     let rootAfterLoad = gm.rlnInstance.getMerkleRoot().valueOr:
       return err("Failed to get root after loading: " & error)
-    
+
     # Also try generating a test proof to see what root it contains
-    var testLeaves = newSeq[byte](32)  # Empty signal for test
+    var testLeaves = newSeq[byte](32) # Empty signal for test
     let testSignal = testLeaves
-    
+
     info "Tree loaded and flushed",
       path = path,
       memberCount = gm.membershipByIndex.len,
       rootAfterLoad = rootAfterLoad.toHex()
-    
+
     # If we have credentials, try getting the proof root for comparison
     if gm.credentials.isSome and gm.membershipIndex.isSome:
       let creds = gm.credentials.get()
       let idx = gm.membershipIndex.get()
 
       # Compute expected rate commitment (this is what's stored in the tree)
-      let expectedRateCommitment = computeRateCommitment(creds.idCommitment, UserMessageLimit).valueOr:
+      let expectedRateCommitment = computeRateCommitment(
+        creds.idCommitment, UserMessageLimit
+      ).valueOr:
         warn "Failed to compute rate commitment for verification", error = error
-        return ok()  # Don't fail the load just for verification
+        return ok() # Don't fail the load just for verification
 
       # Try to see what leaf is at our index
       let leafAtIndex = gm.rlnInstance.getLeaf(idx)
@@ -794,7 +799,7 @@ proc loadTreeFromFile*(gm: OffchainGroupManager, path: string): RlnResult[void] 
           expectedCommitment = expectedRateCommitment.toHex(),
           treeCommitment = leafAtIndex.get().toHex(),
           match = (leafAtIndex.get() == expectedRateCommitment)
-    
+
     return ok()
   except IOError as e:
     warn "Failed to read tree file", path = path, error = e.msg

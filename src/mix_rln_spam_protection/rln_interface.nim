@@ -291,7 +291,7 @@ proc generateMembershipKey*(seed: openArray[byte]): RlnResult[IdentityCredential
 proc createRLNInstance*(resourcesPath: string = ""): RlnResult[RLNInstance] =
   ## Creates an RLN instance.
   ## If resourcesPath is empty, uses bundled resources.
-  info "Creating RLN instance", resourcesPath = resourcesPath
+  trace "Creating RLN instance", resourcesPath = resourcesPath
   var ctx: ptr RLN
   var success: bool
 
@@ -304,7 +304,7 @@ proc createRLNInstance*(resourcesPath: string = ""): RlnResult[RLNInstance] =
     "{\"resources_folder\":\"" & folder &
     "\",\"tree_config\":{\"cache_capacity\":15000,\"mode\":\"high_throughput\",\"compression\":false,\"flush_every_ms\":500}}"
 
-  info "RLN config", config = configJson
+  trace "RLN config", config = configJson
   var configBytes = newSeq[byte](configJson.len)
   copyMem(addr configBytes[0], unsafeAddr configJson[0], configJson.len)
   var configBuffer = configBytes.toBuffer()
@@ -329,8 +329,7 @@ proc createRLNInstance*(resourcesPath: string = ""): RlnResult[RLNInstance] =
     if initialRootBuffer.len == 32:
       copyMem(addr initialRoot[0], initialRootBuffer.`ptr`, 32)
 
-  info "RLN instance created successfully",
-    initialTreeRoot = initialRoot.toHex()
+  debug "RLN instance created successfully", initialTreeRoot = initialRoot.toHex()
 
   ok(RLNInstance(ctx: ctx))
 
@@ -356,7 +355,7 @@ proc poseidonHash*(inputs: seq[seq[byte]]): RlnResult[array[32, byte]] =
   for input in inputs:
     inputData.add(input)
 
-  info "Computing Poseidon hash", inputLen = inputData.len, numInputs = inputs.len
+  trace "Computing Poseidon hash", inputLen = inputData.len, numInputs = inputs.len
   var inputBuffer = inputData.toBuffer()
   var outputBuffer: Buffer
 
@@ -370,7 +369,7 @@ proc poseidonHash*(inputs: seq[seq[byte]]): RlnResult[array[32, byte]] =
 
   var hashResult: array[32, byte]
   copyMem(addr hashResult[0], outputBuffer.`ptr`, 32)
-  info "Poseidon hash computed successfully", outputLen = outputBuffer.len
+  trace "Poseidon hash computed successfully", outputLen = outputBuffer.len
   ok(hashResult)
 
 proc keccak256Hash*(data: openArray[byte]): RlnResult[array[32, byte]] =
@@ -439,18 +438,12 @@ proc getMerkleProof*(
   var proof = newSeq[byte](outputBuffer.len)
   if outputBuffer.len > 0:
     copyMem(addr proof[0], outputBuffer.`ptr`, outputBuffer.len)
-  
-  info "getMerkleProof returned",
-    index = index,
-    proofLen = proof.len,
-    proofMod32 = proof.len mod 32,
-    firstBytes = if proof.len >= 8: proof[0..7].toHex() else: "too short"
-  
+
+  trace "getMerkleProof returned", index = index, proofLen = proof.len
+
   ok(proof)
 
-proc getLeaf*(
-    instance: RLNInstance, index: MembershipIndex
-): RlnResult[IDCommitment] =
+proc getLeaf*(instance: RLNInstance, index: MembershipIndex): RlnResult[IDCommitment] =
   ## Gets the leaf value (ID commitment) at the given index.
   var outputBuffer: Buffer
 
@@ -532,22 +525,22 @@ proc serialize*(witness: RLNWitnessInput): seq[byte] =
   buffer.add(@(witness.identity_secret))
   buffer.add(@(witness.user_message_limit))
   buffer.add(@(witness.message_id))
-  
+
   let depth = uint64(witness.path_elements.len div 32)
   # Depth as 8-byte little-endian
   for i in 0 ..< 8:
     buffer.add(byte((depth shr (i * 8)) and 0xFF))
-  
+
   # Path elements (should be depth * 32 bytes)
   buffer.add(witness.path_elements)
-  
+
   # Depth again as 8-byte little-endian
   for i in 0 ..< 8:
     buffer.add(byte((depth shr (i * 8)) and 0xFF))
-  
+
   # Identity path index (depth bytes, each 0 or 1)
   buffer.add(witness.identity_path_index)
-  
+
   buffer.add(@(witness.x))
   buffer.add(@(witness.external_nullifier))
   return buffer
@@ -566,33 +559,35 @@ proc generateRlnProofWithWitness*(
   ## explicitly and using generate_proof_with_witness FFI.
   ## 
   ## This matches waku's OnchainGroupManager approach for reliable proof generation.
-  
-  const MerkleTreeDepth = 20  # Standard RLN tree depth
-  
+
+  const MerkleTreeDepth = 20 # Standard RLN tree depth
+
   # Flush tree to ensure it's synced
   discard flush(instance.ctx)
-  
+
   # Get the Merkle proof for our index
   let merkleProofBytes = instance.getMerkleProof(memberIndex).valueOr:
     return err("Failed to get Merkle proof: " & error)
-  
+
   info "Got Merkle proof for witness-based proof generation",
-    memberIndex = memberIndex,
-    proofBytesLen = merkleProofBytes.len
-  
+    memberIndex = memberIndex, proofBytesLen = merkleProofBytes.len
+
   # Verify we got expected number of bytes
   # Format: [8-byte len][20*32 path_elements][8-byte len][20 identity_path_index]
   # Total: 8 + 640 + 8 + 20 = 676 bytes
   const ExpectedProofSize = 8 + MerkleTreeDepth * 32 + 8 + MerkleTreeDepth
   if merkleProofBytes.len < ExpectedProofSize:
-    return err("Merkle proof too short: expected " & $ExpectedProofSize &
-               " bytes, got " & $merkleProofBytes.len)
-  
+    return err(
+      "Merkle proof too short: expected " & $ExpectedProofSize & " bytes, got " &
+        $merkleProofBytes.len
+    )
+
   # Extract path elements from zerokit's get_proof output
   # Format: [8-byte length LE][path_elements...][8-byte length LE][identity_path_index...]
   # See zerokit/rln/src/utils.rs vec_fr_to_bytes_le and vec_u8_to_bytes_le
-  const PathElementsOffset = 8  # Skip 8-byte length prefix
-  const IdentityPathIndexOffset = PathElementsOffset + MerkleTreeDepth * 32 + 8  # Skip path elements + second length prefix
+  const PathElementsOffset = 8 # Skip 8-byte length prefix
+  const IdentityPathIndexOffset = PathElementsOffset + MerkleTreeDepth * 32 + 8
+    # Skip path elements + second length prefix
 
   var pathElements = newSeq[byte](MerkleTreeDepth * 32)
   for i in 0 ..< MerkleTreeDepth * 32:
@@ -602,18 +597,18 @@ proc generateRlnProofWithWitness*(
   var identityPathIndex = newSeq[byte](MerkleTreeDepth)
   for i in 0 ..< MerkleTreeDepth:
     identityPathIndex[i] = merkleProofBytes[IdentityPathIndexOffset + i]
-  
+
   # Compute external nullifier = Poseidon(epoch, rlnIdentifier)
   let externalNullifier = poseidonHash(@[@epoch, @rlnIdentifier]).valueOr:
     return err("Failed to compute external nullifier: " & error)
-  
+
   # Compute signal hash x = keccak256(signal)
   var x: Field
   if signal.len > 0:
     let signalHash = keccak256.digest(signal)
     for i in 0 ..< 32:
       x[i] = signalHash.data[i]
-  
+
   # Build the witness input
   let witness = RLNWitnessInput(
     identity_secret: seqToField(@(credential.idSecretHash)),
@@ -624,11 +619,11 @@ proc generateRlnProofWithWitness*(
     x: x,
     external_nullifier: seqToField(@externalNullifier),
   )
-  
+
   # Debug: log first path element and identity path index for verification
   var firstPathElement: string
   if pathElements.len >= 32:
-    firstPathElement = pathElements[0..31].toHex()
+    firstPathElement = pathElements[0 .. 31].toHex()
   var pathIndexStr: string
   for i in 0 ..< min(identityPathIndex.len, 10):
     pathIndexStr.add($identityPathIndex[i] & " ")
@@ -640,72 +635,71 @@ proc generateRlnProofWithWitness*(
     messageId = messageId,
     firstPathElement = firstPathElement,
     pathIndexFirst10 = pathIndexStr,
-    idSecretHashHex = credential.idSecretHash.toHex()[0..15] & "..."
-  
+    idSecretHashHex = credential.idSecretHash.toHex()[0 .. 15] & "..."
+
   # Serialize the witness
   let serializedWitness = witness.serialize()
-  
-  info "Serialized witness for FFI",
-    serializedLen = serializedWitness.len
-  
+
+  info "Serialized witness for FFI", serializedLen = serializedWitness.len
+
   var inputBuffer = serializedWitness.toBuffer()
   var outputBuffer: Buffer
-  
+
   # Call generate_proof_with_witness FFI
   if not generate_proof_with_witness(instance.ctx, addr inputBuffer, addr outputBuffer):
     error "generate_proof_with_witness FFI call failed"
     return err("Failed to generate RLN proof with witness")
-  
+
   info "generate_proof_with_witness FFI succeeded", outputLen = outputBuffer.len
-  
+
   # Parse output: proof<128> | root<32> | external_nullifier<32> | share_x<32> | share_y<32> | nullifier<32>
   if outputBuffer.len < 288:
     return err("Invalid proof output length: " & $outputBuffer.len)
-  
+
   let outputData = cast[ptr UncheckedArray[byte]](outputBuffer.`ptr`)
-  
+
   var proof: RateLimitProof
   var offset = 0
-  
+
   # zkSNARK proof (128 bytes)
   for i in 0 ..< 128:
     proof.proof[i] = outputData[offset + i]
   offset += 128
-  
+
   # Merkle root (32 bytes)
   for i in 0 ..< 32:
     proof.merkleRoot[i] = outputData[offset + i]
   offset += 32
-  
+
   # External nullifier / epoch (32 bytes) - we store epoch in proof
   for i in 0 ..< 32:
     proof.epoch[i] = epoch[i]
   offset += 32
-  
+
   # Share X (32 bytes)
   for i in 0 ..< 32:
     proof.shareX[i] = outputData[offset + i]
   offset += 32
-  
+
   # Share Y (32 bytes)
   for i in 0 ..< 32:
     proof.shareY[i] = outputData[offset + i]
   offset += 32
-  
+
   # Nullifier (32 bytes)
   for i in 0 ..< 32:
     proof.nullifier[i] = outputData[offset + i]
-  
+
   # Verify the proof root matches our current tree root
   let currentRoot = instance.getMerkleRoot().valueOr:
     warn "Could not verify proof root", error = error
     return ok(proof)
-  
+
   info "Witness-based proof generation complete",
     proofMerkleRoot = proof.merkleRoot.toHex(),
     currentMerkleRoot = currentRoot.toHex(),
     rootsMatch = proof.merkleRoot == currentRoot
-  
+
   ok(proof)
 
 proc generateRlnProof*(
@@ -794,9 +788,7 @@ proc generateRlnProof*(
     inputData.add(@signal)
 
   info "Calling generate_proof FFI",
-    inputLen = inputData.len,
-    signalLen = signal.len,
-    memberIndex = memberIndex
+    inputLen = inputData.len, signalLen = signal.len, memberIndex = memberIndex
 
   var inputBuffer = inputData.toBuffer()
   var outputBuffer: Buffer
