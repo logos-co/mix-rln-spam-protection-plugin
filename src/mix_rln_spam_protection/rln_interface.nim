@@ -569,7 +569,7 @@ proc generateRlnProofWithWitness*(
   let merkleProofBytes = instance.getMerkleProof(memberIndex).valueOr:
     return err("Failed to get Merkle proof: " & error)
 
-  info "Got Merkle proof for witness-based proof generation",
+  trace "Got Merkle proof for witness-based proof generation",
     memberIndex = memberIndex, proofBytesLen = merkleProofBytes.len
 
   # Verify we got expected number of bytes
@@ -628,19 +628,16 @@ proc generateRlnProofWithWitness*(
   for i in 0 ..< min(identityPathIndex.len, 10):
     pathIndexStr.add($identityPathIndex[i] & " ")
 
-  info "Built RLN witness for proof generation",
+  trace "Built RLN witness for proof generation",
     memberIndex = memberIndex,
     pathElementsLen = pathElements.len,
     identityPathIndexLen = identityPathIndex.len,
-    messageId = messageId,
-    firstPathElement = firstPathElement,
-    pathIndexFirst10 = pathIndexStr,
-    idSecretHashHex = credential.idSecretHash.toHex()[0 .. 15] & "..."
+    messageId = messageId
 
   # Serialize the witness
   let serializedWitness = witness.serialize()
 
-  info "Serialized witness for FFI", serializedLen = serializedWitness.len
+  trace "Serialized witness for FFI", serializedLen = serializedWitness.len
 
   var inputBuffer = serializedWitness.toBuffer()
   var outputBuffer: Buffer
@@ -650,7 +647,7 @@ proc generateRlnProofWithWitness*(
     error "generate_proof_with_witness FFI call failed"
     return err("Failed to generate RLN proof with witness")
 
-  info "generate_proof_with_witness FFI succeeded", outputLen = outputBuffer.len
+  trace "generate_proof_with_witness FFI succeeded", outputLen = outputBuffer.len
 
   # Parse output: proof<128> | root<32> | external_nullifier<32> | share_x<32> | share_y<32> | nullifier<32>
   if outputBuffer.len < 288:
@@ -695,7 +692,7 @@ proc generateRlnProofWithWitness*(
     warn "Could not verify proof root", error = error
     return ok(proof)
 
-  info "Witness-based proof generation complete",
+  debug "Witness-based proof generation complete",
     proofMerkleRoot = proof.merkleRoot.toHex(),
     currentMerkleRoot = currentRoot.toHex(),
     rootsMatch = proof.merkleRoot == currentRoot
@@ -741,7 +738,7 @@ proc generateRlnProof*(
     if postFlush2RootBuffer.len == 32:
       copyMem(addr postFlush2Root[0], postFlush2RootBuffer.`ptr`, 32)
 
-  info "Root comparison during proof generation",
+  trace "Root comparison during proof generation",
     preFlushRoot = preFlushRoot.toHex(),
     postFlush1Root = postFlush1Root.toHex(),
     postFlush2Root = postFlush2Root.toHex(),
@@ -787,7 +784,7 @@ proc generateRlnProof*(
   if signal.len > 0:
     inputData.add(@signal)
 
-  info "Calling generate_proof FFI",
+  trace "Calling generate_proof FFI",
     inputLen = inputData.len, signalLen = signal.len, memberIndex = memberIndex
 
   var inputBuffer = inputData.toBuffer()
@@ -798,7 +795,7 @@ proc generateRlnProof*(
       inputLen = inputData.len, outputBufferLen = outputBuffer.len
     return err("Failed to generate RLN proof")
 
-  info "generate_proof_with_witness FFI succeeded", outputLen = outputBuffer.len
+  trace "generate_proof FFI succeeded", outputLen = outputBuffer.len
 
   # Parse output: proof<128> | root<32> | external_nullifier<32> | share_x<32> | share_y<32> | nullifier<32>
   if outputBuffer.len < 288:

@@ -189,11 +189,9 @@ method generateProof*(
   let creds = gm.credentials.get()
   let index = gm.membershipIndex.get()
 
-  info "Generating proof with credentials",
+  trace "Generating proof with credentials",
     membershipIndex = index,
-    commitment = creds.idCommitment.toHex(),
-    idSecretHash = creds.idSecretHash.toHex()[0 .. 15] & "...",
-    idTrapdoor = creds.idTrapdoor.toHex()[0 .. 15] & "..."
+    commitment = creds.idCommitment.toHex()
 
   # Flush tree to ensure internal state is synced
   if not flush(gm.rlnInstance.ctx):
@@ -209,10 +207,8 @@ method generateProof*(
   ).valueOr:
     return err("Failed to compute expected rate commitment: " & error)
 
-  info "Tree state verification before proof generation",
+  trace "Tree state verification before proof generation",
     membershipIndex = index,
-    treeCommitment = treeCommitment.toHex(),
-    expectedCommitment = expectedRateCommitment.toHex(),
     commitmentsMatch = treeCommitment == expectedRateCommitment
 
   if treeCommitment != expectedRateCommitment:
@@ -229,13 +225,10 @@ method generateProof*(
   let currentRoot = gm.rlnInstance.getMerkleRoot().valueOr:
     return err("Failed to get current Merkle root: " & error)
 
-  info "Generating RLN proof",
+  trace "Generating RLN proof",
     signalLen = signal.len,
-    epochLen = epoch.len,
-    rlnIdentifierLen = rlnIdentifier.len,
     messageId = messageId,
-    membershipIndex = index,
-    currentMerkleRoot = currentRoot.toHex()
+    membershipIndex = index
 
   # Use witness-based proof generation for reliable Merkle proof handling
   # This explicitly fetches the Merkle proof and passes it to zerokit,
@@ -250,13 +243,11 @@ method generateProof*(
 
   # Log the root that ended up in the generated proof
   let generatedProof = proofResult.get()
-  info "RLN proof generated successfully",
-    proofMerkleRoot = generatedProof.merkleRoot.toHex(),
-    currentMerkleRoot = currentRoot.toHex(),
+  debug "RLN proof generated successfully",
     rootsMatch = generatedProof.merkleRoot == currentRoot
 
   if generatedProof.merkleRoot != currentRoot:
-    error "WARNING: Generated proof contains different root than current tree!",
+    warn "Generated proof contains different root than current tree",
       proofRoot = generatedProof.merkleRoot.toHex(), currentRoot = currentRoot.toHex()
 
   return proofResult
@@ -386,10 +377,7 @@ method register*(
     return err("Commitment already registered")
 
   let index = gm.nextIndex
-  info "Registering member",
-    index = index,
-    nextIndex = gm.nextIndex,
-    currentMemberCount = gm.membershipByIndex.len
+  trace "Registering member", index = index
   gm.nextIndex += 1
 
   # Compute rate commitment = Poseidon(idCommitment, userMessageLimit)
@@ -406,10 +394,7 @@ method register*(
   gm.membershipByCommitment[commitment] = index
   gm.membershipByIndex[index] = commitment
 
-  info "Member added to local tables",
-    index = index,
-    newMemberCount = gm.membershipByIndex.len,
-    newNextIndex = gm.nextIndex
+  trace "Member added to local tables", index = index
 
   # Update root tracker
   gm.updateRootTrackerOrLog()
@@ -426,7 +411,7 @@ method register*(
   if gm.onRegister.isSome:
     await gm.onRegister.get()(commitment, index)
 
-  info "Member registered", index = index
+  debug "Member registered", index = index
   ok(index)
 
 method register*(
@@ -447,7 +432,7 @@ method register*(
   gm.credentials = some(credentials)
   gm.membershipIndex = some(index)
 
-  info "Self registered", index = index
+  debug "Self registered", index = index
   ok(index)
 
 method withdraw*(
@@ -492,7 +477,7 @@ method withdraw*(
     gm.membershipIndex = none(MembershipIndex)
     warn "Self membership withdrawn"
 
-  info "Member withdrawn", index = index
+  debug "Member withdrawn", index = index
   ok()
 
 proc handleMembershipUpdate*(
@@ -675,11 +660,9 @@ proc loadTreeSnapshot*(gm: OffchainGroupManager, data: seq[byte]): RlnResult[voi
     (uint64(data[offset + 6]) shl 48) or (uint64(data[offset + 7]) shl 56)
   offset += 8
 
-  info "Parsed tree snapshot header",
+  trace "Parsed tree snapshot header",
     memberCount = memberCount,
-    nextIndex = nextIndex,
-    dataLen = data.len,
-    expectedSize = 16 + int(memberCount) * 40
+    nextIndex = nextIndex
 
   let expectedSize = 16 + int(memberCount) * 40
   if data.len != expectedSize:
@@ -729,30 +712,26 @@ proc loadTreeSnapshot*(gm: OffchainGroupManager, data: seq[byte]): RlnResult[voi
   # Update root tracker
   gm.updateRootTrackerOrLog()
 
-  info "Loaded tree snapshot", memberCount = memberCount, nextIndex = nextIndex
+  debug "Loaded tree snapshot", memberCount = memberCount, nextIndex = nextIndex
   ok()
 
 proc saveTreeToFile*(gm: OffchainGroupManager, path: string): RlnResult[void] =
   ## Save the current tree state to a file.
   let data = gm.serializeTreeSnapshot()
-  info "saveTreeToFile called",
-    path = path,
-    memberCount = gm.membershipByIndex.len,
-    nextIndex = gm.nextIndex,
-    dataLen = data.len
+  trace "saveTreeToFile called", path = path, memberCount = gm.membershipByIndex.len
   try:
     writeFile(path, data)
-    info "Tree file written successfully", path = path, size = data.len
+    debug "Tree file written successfully", path = path
     ok()
   except IOError as e:
     err("Failed to write tree file: " & e.msg)
 
 proc loadTreeFromFile*(gm: OffchainGroupManager, path: string): RlnResult[void] =
   ## Load tree state from a file.
-  info "loadTreeFromFile called", path = path
+  trace "loadTreeFromFile called", path = path
   try:
     let strData = readFile(path)
-    info "Tree file read successfully", dataLen = strData.len
+    trace "Tree file read successfully", dataLen = strData.len
     # Properly convert string to seq[byte] without cast
     var data = newSeq[byte](strData.len)
     if strData.len > 0:
@@ -774,10 +753,9 @@ proc loadTreeFromFile*(gm: OffchainGroupManager, path: string): RlnResult[void] 
     var testLeaves = newSeq[byte](32) # Empty signal for test
     let testSignal = testLeaves
 
-    info "Tree loaded and flushed",
+    debug "Tree loaded and flushed",
       path = path,
-      memberCount = gm.membershipByIndex.len,
-      rootAfterLoad = rootAfterLoad.toHex()
+      memberCount = gm.membershipByIndex.len
 
     # If we have credentials, try getting the proof root for comparison
     if gm.credentials.isSome and gm.membershipIndex.isSome:
@@ -794,10 +772,8 @@ proc loadTreeFromFile*(gm: OffchainGroupManager, path: string): RlnResult[void] 
       # Try to see what leaf is at our index
       let leafAtIndex = gm.rlnInstance.getLeaf(idx)
       if leafAtIndex.isOk:
-        info "Leaf verification after tree load",
+        trace "Leaf verification after tree load",
           index = idx,
-          expectedCommitment = expectedRateCommitment.toHex(),
-          treeCommitment = leafAtIndex.get().toHex(),
           match = (leafAtIndex.get() == expectedRateCommitment)
 
     return ok()

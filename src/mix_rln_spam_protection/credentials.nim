@@ -219,7 +219,7 @@ proc saveKeystore*(
 
   try:
     writeFile(path, $json)
-    info "Saved keystore", path = path
+    debug "Saved keystore", path = path
     ok()
   except IOError as e:
     err("Failed to write keystore: " & e.msg)
@@ -257,7 +257,7 @@ proc loadKeystore*(
   let cred = decryptCredential(entry, password).valueOr:
     return err("Failed to decrypt credential: " & error)
 
-  info "Loaded keystore", path = path, hasIndex = entry.membershipIndex.isSome
+  debug "Loaded keystore", path = path, hasIndex = entry.membershipIndex.isSome
   ok((cred, entry.membershipIndex))
 
 proc addToKeystore*(
@@ -299,7 +299,7 @@ proc addToKeystore*(
 
   try:
     writeFile(path, $json)
-    info "Added credential to keystore", path = path, totalEntries = entriesJson.len
+    debug "Added credential to keystore", path = path
     ok()
   except IOError as e:
     err("Failed to write keystore: " & e.msg)
@@ -313,8 +313,7 @@ proc loadOrGenerateCredentials*(
   if fileExists(keystorePath):
     let (cred, index) = loadKeystore(keystorePath, password).valueOr:
       return err("Failed to load keystore: " & error)
-    info "Loaded existing credentials",
-      commitmentHex = cred.idCommitment.toHex()[0 .. 15] & "..."
+    debug "Loaded existing credentials"
     ok((cred, index, false))
   else:
     let cred = generateCredentials().valueOr:
@@ -325,6 +324,5 @@ proc loadOrGenerateCredentials*(
     if saveResult.isErr:
       warn "Failed to save generated credentials", error = saveResult.error
 
-    info "Generated new credentials",
-      commitmentHex = cred.idCommitment.toHex()[0 .. 15] & "..."
+    debug "Generated new credentials"
     ok((cred, none(MembershipIndex), true))

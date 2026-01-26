@@ -259,10 +259,10 @@ method generateProof*(
   ## For per-hop generation, bindingData is the outgoing Sphinx packet.
   ## The proof is generated using the node's credentials and current epoch.
 
-  info "MixRlnSpamProtection.generateProof called", bindingDataLen = bindingData.len
+  trace "MixRlnSpamProtection.generateProof called", bindingDataLen = bindingData.len
 
   if not sp.isReady():
-    error "Spam protection not ready for proof generation"
+    warn "Spam protection not ready for proof generation"
     return err("Plugin not ready")
 
   let epoch = currentEpoch()
@@ -278,10 +278,8 @@ method generateProof*(
       counter = sp.messageIdCounter, limit = sp.config.userMessageLimit
     return err("Message limit exceeded for current epoch")
 
-  info "Calling groupManager.generateProof",
+  trace "Calling groupManager.generateProof",
     bindingDataLen = bindingData.len,
-    epochLen = epoch.len,
-    rlnIdentifierLen = sp.config.rlnIdentifier.len,
     messageId = sp.messageIdCounter
 
   # Generate proof
@@ -296,20 +294,9 @@ method generateProof*(
   # Serialize proof using protobuf
   let serialized = proof.toBytes()
 
-  info "Generated RLN proof successfully",
+  debug "Generated RLN proof successfully",
     epoch = epochToUint64(epoch),
-    messageId = sp.messageIdCounter - 1,
-    proofLen = serialized.len,
-    declaredProofSize = sp.proofSize,
-    actualProofSize = serialized.len,
-    nullifier = proof.nullifier[0 .. 7].toHex() & "..."
-
-  # Verify the declared proofSize matches actual size
-  if serialized.len != sp.proofSize:
-    error "MISMATCH: Declared proofSize does not match actual protobuf-encoded size",
-      declared = sp.proofSize,
-      actual = serialized.len,
-      difference = serialized.len - sp.proofSize
+    messageId = sp.messageIdCounter - 1
 
   ok(serialized)
 
@@ -407,20 +394,8 @@ method verifyProof*(
     return ok(false)
 
   # Check Merkle root validity
-  let validRoots = sp.groupManager.rootTracker.getValidRoots()
-  let currentRoot = sp.groupManager.rlnInstance.getMerkleRoot().valueOr:
-    return err("Failed to get current Merkle root: " & error)
-
   if not sp.groupManager.validateRoot(proof.merkleRoot):
-    error "Proof rejected: invalid Merkle root",
-      proofRoot = proof.merkleRoot.toHex(),
-      currentRoot = currentRoot.toHex(),
-      numValidRoots = validRoots.len,
-      validRootsPreview =
-        if validRoots.len > 0:
-          validRoots[0][0 .. 7].toHex() & "..."
-        else:
-          "none"
+    debug "Proof rejected: invalid Merkle root"
     return ok(false)
 
   # Verify the zkSNARK proof
@@ -524,13 +499,10 @@ proc loadTree*(sp: MixRlnSpamProtection): RlnResult[void] =
   ## Load tree state from file.
   let result = sp.groupManager.loadTreeFromFile(sp.config.treePath)
   if result.isOk:
-    let currentRoot = sp.groupManager.rlnInstance.getMerkleRoot().valueOr:
-      return err("Failed to get Merkle root after loading tree: " & error)
     let memberCount = sp.groupManager.getMemberCount()
-    info "Tree loaded from file",
+    debug "Tree loaded from file",
       treePath = sp.config.treePath,
-      memberCount = memberCount,
-      currentRoot = currentRoot.toHex()
+      memberCount = memberCount
   result
 
 proc restoreCredentialsToTree*(sp: MixRlnSpamProtection): RlnResult[void] =
