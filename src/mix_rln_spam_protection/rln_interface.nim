@@ -8,6 +8,7 @@
 
 import results, chronicles
 import nimcrypto/keccak as keccak
+import stew/[arrayops, endians2]
 import ./types
 import ./constants
 
@@ -321,7 +322,16 @@ proc createRLNInstance*(resourcesPath: string = ""): RlnResult[RLNInstance] =
     error "Failed to create RLN instance", success = success, ctxIsNil = ctx.isNil
     return err("Failed to create RLN instance")
 
-  info "RLN instance created successfully"
+  # Log the initial root of the fresh tree
+  var initialRootBuffer: Buffer
+  var initialRoot: array[32, byte]
+  if get_root(ctx, addr initialRootBuffer):
+    if initialRootBuffer.len == 32:
+      copyMem(addr initialRoot[0], initialRootBuffer.`ptr`, 32)
+
+  info "RLN instance created successfully",
+    initialTreeRoot = initialRoot.toHex()
+
   ok(RLNInstance(ctx: ctx))
 
 # Alias
@@ -378,6 +388,31 @@ proc computeExternalNullifier*(
   ## This matches logos-messaging-nim's generateExternalNullifier
   poseidonHash(@[@epoch, @rlnIdentifier])
 
+proc computeRateCommitment*(
+    idCommitment: IDCommitment, userMessageLimit: uint64
+): RlnResult[IDCommitment] =
+  ## Compute rate commitment = Poseidon(idCommitment, userMessageLimit)
+  ## This is the actual leaf value stored in the RLN Merkle tree.
+  ## Note: The tree stores rate_commitment, not id_commitment!
+  var limitBytes: array[32, byte]
+  # Convert userMessageLimit to 32-byte little-endian field element
+  limitBytes[0] = byte(userMessageLimit and 0xFF)
+  limitBytes[1] = byte((userMessageLimit shr 8) and 0xFF)
+  limitBytes[2] = byte((userMessageLimit shr 16) and 0xFF)
+  limitBytes[3] = byte((userMessageLimit shr 24) and 0xFF)
+  limitBytes[4] = byte((userMessageLimit shr 32) and 0xFF)
+  limitBytes[5] = byte((userMessageLimit shr 40) and 0xFF)
+  limitBytes[6] = byte((userMessageLimit shr 48) and 0xFF)
+  limitBytes[7] = byte((userMessageLimit shr 56) and 0xFF)
+  # Rest is zero-padded
+
+  let hashResult = poseidonHash(@[@idCommitment, @limitBytes]).valueOr:
+    return err("Failed to compute rate commitment: " & error)
+
+  var rateCommitment: IDCommitment
+  copyMem(addr rateCommitment[0], unsafeAddr hashResult[0], 32)
+  ok(rateCommitment)
+
 proc getMerkleRoot*(instance: RLNInstance): RlnResult[MerkleNode] =
   ## Gets the current Merkle root.
   var outputBuffer: Buffer
@@ -404,7 +439,30 @@ proc getMerkleProof*(
   var proof = newSeq[byte](outputBuffer.len)
   if outputBuffer.len > 0:
     copyMem(addr proof[0], outputBuffer.`ptr`, outputBuffer.len)
+  
+  info "getMerkleProof returned",
+    index = index,
+    proofLen = proof.len,
+    proofMod32 = proof.len mod 32,
+    firstBytes = if proof.len >= 8: proof[0..7].toHex() else: "too short"
+  
   ok(proof)
+
+proc getLeaf*(
+    instance: RLNInstance, index: MembershipIndex
+): RlnResult[IDCommitment] =
+  ## Gets the leaf value (ID commitment) at the given index.
+  var outputBuffer: Buffer
+
+  if not get_leaf(instance.ctx, uint(index), addr outputBuffer):
+    return err("Failed to get leaf at index " & $index)
+
+  if outputBuffer.len != 32:
+    return err("Invalid leaf length: " & $outputBuffer.len)
+
+  var commitment: IDCommitment
+  copyMem(addr commitment[0], outputBuffer.`ptr`, 32)
+  ok(commitment)
 
 proc insertMember*(
     instance: RLNInstance, commitment: IDCommitment
@@ -456,6 +514,200 @@ proc insertMemberAt*(
     return err("Failed to insert member at index")
   ok()
 
+# ----------------- Witness-based proof generation -----------------
+
+proc serialize*(witness: RLNWitnessInput): seq[byte] =
+  ## Serializes the RLN witness into a byte array following zerokit's expected format.
+  ## The serialized format includes:
+  ## - identity_secret (32 bytes)
+  ## - user_message_limit (32 bytes)
+  ## - message_id (32 bytes)
+  ## - merkle tree depth (8 bytes, little-endian) = path_elements.len / 32
+  ## - path_elements (each 32 bytes, ordered bottom-to-top)
+  ## - merkle tree depth again (8 bytes, little-endian)
+  ## - identity_path_index (sequence of bits as bytes, 0 = left, 1 = right)
+  ## - x (32 bytes)
+  ## - external_nullifier (32 bytes)
+  var buffer: seq[byte]
+  buffer.add(@(witness.identity_secret))
+  buffer.add(@(witness.user_message_limit))
+  buffer.add(@(witness.message_id))
+  
+  let depth = uint64(witness.path_elements.len div 32)
+  # Depth as 8-byte little-endian
+  for i in 0 ..< 8:
+    buffer.add(byte((depth shr (i * 8)) and 0xFF))
+  
+  # Path elements (should be depth * 32 bytes)
+  buffer.add(witness.path_elements)
+  
+  # Depth again as 8-byte little-endian
+  for i in 0 ..< 8:
+    buffer.add(byte((depth shr (i * 8)) and 0xFF))
+  
+  # Identity path index (depth bytes, each 0 or 1)
+  buffer.add(witness.identity_path_index)
+  
+  buffer.add(@(witness.x))
+  buffer.add(@(witness.external_nullifier))
+  return buffer
+
+proc generateRlnProofWithWitness*(
+    instance: RLNInstance,
+    credential: IdentityCredential,
+    memberIndex: MembershipIndex,
+    epoch: Epoch,
+    rlnIdentifier: RlnIdentifier,
+    signal: openArray[byte],
+    messageId: uint = 0,
+): RlnResult[RateLimitProof] =
+  ## Generate an RLN proof using explicit Merkle proof (witness-based).
+  ## This bypasses zerokit's internal Merkle cache by fetching the proof
+  ## explicitly and using generate_proof_with_witness FFI.
+  ## 
+  ## This matches waku's OnchainGroupManager approach for reliable proof generation.
+  
+  const MerkleTreeDepth = 20  # Standard RLN tree depth
+  
+  # Flush tree to ensure it's synced
+  discard flush(instance.ctx)
+  
+  # Get the Merkle proof for our index
+  let merkleProofBytes = instance.getMerkleProof(memberIndex).valueOr:
+    return err("Failed to get Merkle proof: " & error)
+  
+  info "Got Merkle proof for witness-based proof generation",
+    memberIndex = memberIndex,
+    proofBytesLen = merkleProofBytes.len
+  
+  # Verify we got expected number of bytes
+  # Format: [8-byte len][20*32 path_elements][8-byte len][20 identity_path_index]
+  # Total: 8 + 640 + 8 + 20 = 676 bytes
+  const ExpectedProofSize = 8 + MerkleTreeDepth * 32 + 8 + MerkleTreeDepth
+  if merkleProofBytes.len < ExpectedProofSize:
+    return err("Merkle proof too short: expected " & $ExpectedProofSize &
+               " bytes, got " & $merkleProofBytes.len)
+  
+  # Extract path elements from zerokit's get_proof output
+  # Format: [8-byte length LE][path_elements...][8-byte length LE][identity_path_index...]
+  # See zerokit/rln/src/utils.rs vec_fr_to_bytes_le and vec_u8_to_bytes_le
+  const PathElementsOffset = 8  # Skip 8-byte length prefix
+  const IdentityPathIndexOffset = PathElementsOffset + MerkleTreeDepth * 32 + 8  # Skip path elements + second length prefix
+
+  var pathElements = newSeq[byte](MerkleTreeDepth * 32)
+  for i in 0 ..< MerkleTreeDepth * 32:
+    pathElements[i] = merkleProofBytes[PathElementsOffset + i]
+
+  # Extract identity path index from the proof (zerokit already computed it)
+  var identityPathIndex = newSeq[byte](MerkleTreeDepth)
+  for i in 0 ..< MerkleTreeDepth:
+    identityPathIndex[i] = merkleProofBytes[IdentityPathIndexOffset + i]
+  
+  # Compute external nullifier = Poseidon(epoch, rlnIdentifier)
+  let externalNullifier = poseidonHash(@[@epoch, @rlnIdentifier]).valueOr:
+    return err("Failed to compute external nullifier: " & error)
+  
+  # Compute signal hash x = keccak256(signal)
+  var x: Field
+  if signal.len > 0:
+    let signalHash = keccak256.digest(signal)
+    for i in 0 ..< 32:
+      x[i] = signalHash.data[i]
+  
+  # Build the witness input
+  let witness = RLNWitnessInput(
+    identity_secret: seqToField(@(credential.idSecretHash)),
+    user_message_limit: uint64ToField(uint64(UserMessageLimit)),
+    message_id: uint64ToField(uint64(messageId)),
+    path_elements: pathElements,
+    identity_path_index: identityPathIndex,
+    x: x,
+    external_nullifier: seqToField(@externalNullifier),
+  )
+  
+  # Debug: log first path element and identity path index for verification
+  var firstPathElement: string
+  if pathElements.len >= 32:
+    firstPathElement = pathElements[0..31].toHex()
+  var pathIndexStr: string
+  for i in 0 ..< min(identityPathIndex.len, 10):
+    pathIndexStr.add($identityPathIndex[i] & " ")
+
+  info "Built RLN witness for proof generation",
+    memberIndex = memberIndex,
+    pathElementsLen = pathElements.len,
+    identityPathIndexLen = identityPathIndex.len,
+    messageId = messageId,
+    firstPathElement = firstPathElement,
+    pathIndexFirst10 = pathIndexStr,
+    idSecretHashHex = credential.idSecretHash.toHex()[0..15] & "..."
+  
+  # Serialize the witness
+  let serializedWitness = witness.serialize()
+  
+  info "Serialized witness for FFI",
+    serializedLen = serializedWitness.len
+  
+  var inputBuffer = serializedWitness.toBuffer()
+  var outputBuffer: Buffer
+  
+  # Call generate_proof_with_witness FFI
+  if not generate_proof_with_witness(instance.ctx, addr inputBuffer, addr outputBuffer):
+    error "generate_proof_with_witness FFI call failed"
+    return err("Failed to generate RLN proof with witness")
+  
+  info "generate_proof_with_witness FFI succeeded", outputLen = outputBuffer.len
+  
+  # Parse output: proof<128> | root<32> | external_nullifier<32> | share_x<32> | share_y<32> | nullifier<32>
+  if outputBuffer.len < 288:
+    return err("Invalid proof output length: " & $outputBuffer.len)
+  
+  let outputData = cast[ptr UncheckedArray[byte]](outputBuffer.`ptr`)
+  
+  var proof: RateLimitProof
+  var offset = 0
+  
+  # zkSNARK proof (128 bytes)
+  for i in 0 ..< 128:
+    proof.proof[i] = outputData[offset + i]
+  offset += 128
+  
+  # Merkle root (32 bytes)
+  for i in 0 ..< 32:
+    proof.merkleRoot[i] = outputData[offset + i]
+  offset += 32
+  
+  # External nullifier / epoch (32 bytes) - we store epoch in proof
+  for i in 0 ..< 32:
+    proof.epoch[i] = epoch[i]
+  offset += 32
+  
+  # Share X (32 bytes)
+  for i in 0 ..< 32:
+    proof.shareX[i] = outputData[offset + i]
+  offset += 32
+  
+  # Share Y (32 bytes)
+  for i in 0 ..< 32:
+    proof.shareY[i] = outputData[offset + i]
+  offset += 32
+  
+  # Nullifier (32 bytes)
+  for i in 0 ..< 32:
+    proof.nullifier[i] = outputData[offset + i]
+  
+  # Verify the proof root matches our current tree root
+  let currentRoot = instance.getMerkleRoot().valueOr:
+    warn "Could not verify proof root", error = error
+    return ok(proof)
+  
+  info "Witness-based proof generation complete",
+    proofMerkleRoot = proof.merkleRoot.toHex(),
+    currentMerkleRoot = currentRoot.toHex(),
+    rootsMatch = proof.merkleRoot == currentRoot
+  
+  ok(proof)
+
 proc generateRlnProof*(
     instance: RLNInstance,
     credential: IdentityCredential,
@@ -465,53 +717,84 @@ proc generateRlnProof*(
     signal: openArray[byte],
     messageId: uint = 0,
 ): RlnResult[RateLimitProof] =
-  ## Generate an RLN proof for a message.
-  ## This follows the RLN-v2 input format.
+  ## Generate an RLN proof for a message using the standard generate_proof FFI.
+  ## This lets zerokit handle Merkle proof retrieval internally.
+
+  # Get root before flush for comparison
+  var preFlushRoot: MerkleNode
+  var preFlushRootBuffer: Buffer
+  if get_root(instance.ctx, addr preFlushRootBuffer):
+    if preFlushRootBuffer.len == 32:
+      copyMem(addr preFlushRoot[0], preFlushRootBuffer.`ptr`, 32)
+
+  # Flush tree to ensure internal state is synced
+  let flushResult1 = flush(instance.ctx)
+
+  # Get root after first flush
+  var postFlush1Root: MerkleNode
+  var postFlush1RootBuffer: Buffer
+  if get_root(instance.ctx, addr postFlush1RootBuffer):
+    if postFlush1RootBuffer.len == 32:
+      copyMem(addr postFlush1Root[0], postFlush1RootBuffer.`ptr`, 32)
+
+  # Second flush
+  let flushResult2 = flush(instance.ctx)
+
+  # Get root after second flush
+  var postFlush2Root: MerkleNode
+  var postFlush2RootBuffer: Buffer
+  if get_root(instance.ctx, addr postFlush2RootBuffer):
+    if postFlush2RootBuffer.len == 32:
+      copyMem(addr postFlush2Root[0], postFlush2RootBuffer.`ptr`, 32)
+
+  info "Root comparison during proof generation",
+    preFlushRoot = preFlushRoot.toHex(),
+    postFlush1Root = postFlush1Root.toHex(),
+    postFlush2Root = postFlush2Root.toHex(),
+    flushResult1 = flushResult1,
+    flushResult2 = flushResult2
 
   # Compute external nullifier = Poseidon(epoch, rlnIdentifier)
   let externalNullifier = poseidonHash(@[@epoch, @rlnIdentifier]).valueOr:
     return err("Failed to compute external nullifier: " & error)
 
-  # Serialize input data for proof generation
+  # Serialize input for standard generate_proof
   # Format: identity_secret<32> | identity_index<8> | user_message_limit<32> | message_id<32> | external_nullifier<32> | signal_len<8> | signal<var>
   var inputData = newSeq[byte]()
 
-  # Identity secret hash (32 bytes)
+  # Identity secret (use identity secret hash, not trapdoor - matching waku)
+  # The RLN circuit expects idSecretHash = Poseidon(idTrapdoor, idNullifier)
   inputData.add(@(credential.idSecretHash))
 
-  # Identity index (8 bytes little-endian)
-  let idx = uint64(memberIndex)
-  for i in 0 ..< 8:
-    inputData.add(byte((idx shr (i * 8)) and 0xFF))
+  # Member index (8 bytes, little-endian)
+  let indexBytes = toBytes(uint64(memberIndex), Endianness.littleEndian)
+  inputData.add(@indexBytes)
 
-  # User message limit (32 bytes little-endian, padded)
+  # User message limit (32 bytes, little-endian)
   var userMsgLimit: array[32, byte]
-  let limit = uint64(UserMessageLimit)
-  for i in 0 ..< 8:
-    userMsgLimit[i] = byte((limit shr (i * 8)) and 0xFF)
+  let limitBytes = toBytes(uint64(UserMessageLimit), Endianness.littleEndian)
+  discard userMsgLimit.copyFrom(limitBytes)
   inputData.add(@userMsgLimit)
 
-  # Message ID (32 bytes little-endian, padded)
+  # Message ID (32 bytes, little-endian)
   var msgIdBytes: array[32, byte]
-  let msgId = uint64(messageId)
-  for i in 0 ..< 8:
-    msgIdBytes[i] = byte((msgId shr (i * 8)) and 0xFF)
+  let msgIdEncoded = toBytes(uint64(messageId), Endianness.littleEndian)
+  discard msgIdBytes.copyFrom(msgIdEncoded)
   inputData.add(@msgIdBytes)
 
   # External nullifier (32 bytes)
   inputData.add(@externalNullifier)
 
-  # Signal length (8 bytes little-endian)
-  let sigLen = uint64(signal.len)
-  for i in 0 ..< 8:
-    inputData.add(byte((sigLen shr (i * 8)) and 0xFF))
+  # Signal length (8 bytes, little-endian)
+  let signalLenBytes = toBytes(uint64(signal.len), Endianness.littleEndian)
+  inputData.add(@signalLenBytes)
 
-  # Signal (variable)
-  inputData.add(@signal)
+  # Signal data
+  if signal.len > 0:
+    inputData.add(@signal)
 
   info "Calling generate_proof FFI",
-    inputDataLen = inputData.len,
-    expectedInputSize = 32 + 8 + 32 + 32 + 32 + 8 + signal.len,
+    inputLen = inputData.len,
     signalLen = signal.len,
     memberIndex = memberIndex
 
@@ -523,7 +806,7 @@ proc generateRlnProof*(
       inputLen = inputData.len, outputBufferLen = outputBuffer.len
     return err("Failed to generate RLN proof")
 
-  info "generate_proof FFI succeeded", outputLen = outputBuffer.len
+  info "generate_proof_with_witness FFI succeeded", outputLen = outputBuffer.len
 
   # Parse output: proof<128> | root<32> | external_nullifier<32> | share_x<32> | share_y<32> | nullifier<32>
   if outputBuffer.len < 288:

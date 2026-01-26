@@ -118,6 +118,21 @@ type
   ProofMetadataHandler* = proc(metadata: ProofMetadataBroadcast): Future[void] {.gcsafe, raises: [].}
     ## Handler called when proof metadata is received from network.
 
+  # RLN Witness input for explicit Merkle proof-based proof generation
+  Field* = array[32, byte]
+    ## 32-byte field element representation (256 bits).
+  
+  RLNWitnessInput* = object
+    ## Input structure for generate_proof_with_witness FFI.
+    ## Contains explicit Merkle proof instead of relying on zerokit's internal cache.
+    identity_secret*: Field
+    user_message_limit*: Field
+    message_id*: Field
+    path_elements*: seq[byte]       ## Concatenated 32-byte Merkle path elements
+    identity_path_index*: seq[byte] ## Bit path (LSB-first) through Merkle tree
+    x*: Field                       ## Keccak256 hash of the signal
+    external_nullifier*: Field
+
   # Spam handler callback
   SpamHandler* = proc(
     proof: RateLimitProof,
@@ -217,3 +232,35 @@ proc fromHex*(hex: string): seq[byte] =
       else: return @[]
 
     result[i] = byte((hiVal shl 4) or loVal)
+
+# Helper functions for witness-based proof generation
+
+proc uint64ToField*(n: uint64): Field =
+  ## Convert a uint64 to a 32-byte field element in little-endian.
+  var output: Field
+  output[0] = byte(n and 0xFF)
+  output[1] = byte((n shr 8) and 0xFF)
+  output[2] = byte((n shr 16) and 0xFF)
+  output[3] = byte((n shr 24) and 0xFF)
+  output[4] = byte((n shr 32) and 0xFF)
+  output[5] = byte((n shr 40) and 0xFF)
+  output[6] = byte((n shr 48) and 0xFF)
+  output[7] = byte((n shr 56) and 0xFF)
+  return output
+
+proc seqToField*(s: openArray[byte]): Field =
+  ## Convert a byte sequence to a 32-byte field element.
+  var output: Field
+  let len = min(s.len, 32)
+  for i in 0 ..< len:
+    output[i] = s[i]
+  return output
+
+proc uint64ToIndex*(index: MembershipIndex, depth: int): seq[byte] =
+  ## Convert a membership index to a bit path for Merkle tree traversal.
+  ## Returns LSB-first bit decomposition of the index.
+  ## Each byte is 0 (left) or 1 (right) for the tree traversal.
+  var output = newSeq[byte](depth)
+  for i in 0 ..< depth:
+    output[i] = byte((index shr i) and 1)
+  return output

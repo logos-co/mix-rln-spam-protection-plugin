@@ -152,6 +152,9 @@ proc init*(sp: MixRlnSpamProtection): Future[RlnResult[void]] {.async.} =
 
     sp.groupManager.credentials = some(cred)
     sp.groupManager.membershipIndex = maybeIndex
+    # Note: We don't restore to tree here if we have an index, because loadTree() 
+    # might be called next which would clear membership tables. 
+    # The restoration happens in restoreCredentialsToTree() after tree operations.
 
     if wasGenerated:
       info "Generated new credentials",
@@ -529,6 +532,27 @@ proc loadTree*(sp: MixRlnSpamProtection): RlnResult[void] =
       memberCount = memberCount,
       currentRoot = currentRoot.toHex()
   result
+
+proc restoreCredentialsToTree*(sp: MixRlnSpamProtection): RlnResult[void] =
+  ## Restore our credentials to the tree if we have an index.
+  ## This should be called after tree loading (whether it succeeds or fails).
+  ## If our member is already in the tree, this is a no-op.
+  if sp.groupManager.membershipIndex.isSome and sp.groupManager.credentials.isSome:
+    let cred = sp.groupManager.credentials.get()
+    let index = sp.groupManager.membershipIndex.get()
+    
+    # Check if our member is already in the tree
+    if not sp.groupManager.hasMember(cred.idCommitment):
+      let restoreRes = sp.groupManager.restoreMemberFromKeystore(cred.idCommitment, index)
+      if restoreRes.isErr:
+        return err("Failed to restore member from keystore: " & restoreRes.error)
+      info "Restored credentials to tree", index = index
+  
+  # Always flush after tree operations to ensure Zerokit internal cache is synced
+  if not flush(sp.groupManager.rlnInstance.ctx):
+    return err("Failed to flush tree after restoring credentials")
+  
+  ok()
 
 # Utility accessors
 
