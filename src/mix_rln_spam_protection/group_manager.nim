@@ -741,40 +741,12 @@ proc loadTreeFromFile*(gm: OffchainGroupManager, path: string): RlnResult[void] 
       return loadResult
 
     # Flush the tree after loading to ensure internal cache is synced
-    # Loading calls insertMemberAt() for each member, which modifies the tree
     if not flush(gm.rlnInstance.ctx):
       return err("Failed to flush tree after loading")
-
-    # Get root immediately after loading to verify tree state
-    let rootAfterLoad = gm.rlnInstance.getMerkleRoot().valueOr:
-      return err("Failed to get root after loading: " & error)
-
-    # Also try generating a test proof to see what root it contains
-    var testLeaves = newSeq[byte](32) # Empty signal for test
-    let testSignal = testLeaves
 
     debug "Tree loaded and flushed",
       path = path,
       memberCount = gm.membershipByIndex.len
-
-    # If we have credentials, try getting the proof root for comparison
-    if gm.credentials.isSome and gm.membershipIndex.isSome:
-      let creds = gm.credentials.get()
-      let idx = gm.membershipIndex.get()
-
-      # Compute expected rate commitment (this is what's stored in the tree)
-      let expectedRateCommitment = computeRateCommitment(
-        creds.idCommitment, UserMessageLimit
-      ).valueOr:
-        warn "Failed to compute rate commitment for verification", error = error
-        return ok() # Don't fail the load just for verification
-
-      # Try to see what leaf is at our index
-      let leafAtIndex = gm.rlnInstance.getLeaf(idx)
-      if leafAtIndex.isOk:
-        trace "Leaf verification after tree load",
-          index = idx,
-          match = (leafAtIndex.get() == expectedRateCommitment)
 
     return ok()
   except IOError as e:

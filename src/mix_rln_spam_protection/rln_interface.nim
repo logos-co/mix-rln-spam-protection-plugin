@@ -620,18 +620,9 @@ proc generateRlnProofWithWitness*(
     external_nullifier: seqToField(@externalNullifier),
   )
 
-  # Debug: log first path element and identity path index for verification
-  var firstPathElement: string
-  if pathElements.len >= 32:
-    firstPathElement = pathElements[0 .. 31].toHex()
-  var pathIndexStr: string
-  for i in 0 ..< min(identityPathIndex.len, 10):
-    pathIndexStr.add($identityPathIndex[i] & " ")
-
   trace "Built RLN witness for proof generation",
     memberIndex = memberIndex,
     pathElementsLen = pathElements.len,
-    identityPathIndexLen = identityPathIndex.len,
     messageId = messageId
 
   # Serialize the witness
@@ -710,40 +701,10 @@ proc generateRlnProof*(
 ): RlnResult[RateLimitProof] =
   ## Generate an RLN proof for a message using the standard generate_proof FFI.
   ## This lets zerokit handle Merkle proof retrieval internally.
-
-  # Get root before flush for comparison
-  var preFlushRoot: MerkleNode
-  var preFlushRootBuffer: Buffer
-  if get_root(instance.ctx, addr preFlushRootBuffer):
-    if preFlushRootBuffer.len == 32:
-      copyMem(addr preFlushRoot[0], preFlushRootBuffer.`ptr`, 32)
+  ## Note: generateRlnProofWithWitness is preferred for reliable Merkle proof handling.
 
   # Flush tree to ensure internal state is synced
-  let flushResult1 = flush(instance.ctx)
-
-  # Get root after first flush
-  var postFlush1Root: MerkleNode
-  var postFlush1RootBuffer: Buffer
-  if get_root(instance.ctx, addr postFlush1RootBuffer):
-    if postFlush1RootBuffer.len == 32:
-      copyMem(addr postFlush1Root[0], postFlush1RootBuffer.`ptr`, 32)
-
-  # Second flush
-  let flushResult2 = flush(instance.ctx)
-
-  # Get root after second flush
-  var postFlush2Root: MerkleNode
-  var postFlush2RootBuffer: Buffer
-  if get_root(instance.ctx, addr postFlush2RootBuffer):
-    if postFlush2RootBuffer.len == 32:
-      copyMem(addr postFlush2Root[0], postFlush2RootBuffer.`ptr`, 32)
-
-  trace "Root comparison during proof generation",
-    preFlushRoot = preFlushRoot.toHex(),
-    postFlush1Root = postFlush1Root.toHex(),
-    postFlush2Root = postFlush2Root.toHex(),
-    flushResult1 = flushResult1,
-    flushResult2 = flushResult2
+  discard flush(instance.ctx)
 
   # Compute external nullifier = Poseidon(epoch, rlnIdentifier)
   let externalNullifier = poseidonHash(@[@epoch, @rlnIdentifier]).valueOr:
