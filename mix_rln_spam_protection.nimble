@@ -15,8 +15,8 @@ requires "nimcrypto >= 0.6.0"
 requires "secp256k1 >= 0.5.0"
 requires "json_serialization >= 0.2.0"
 
-# nim-libp2p with mix spam protection (PR #2037)
-requires "https://github.com/vacp2p/nim-libp2p.git#feat/mix-spam-protection"
+# nim-libp2p with mix spam protection (PR #2037 merged)
+requires "https://github.com/vacp2p/nim-libp2p.git#525a9dd3fb381c4e5fa4429cf0bf664814e4d67e"
 
 # Tasks
 task test, "Run tests":

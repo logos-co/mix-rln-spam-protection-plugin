@@ -7,7 +7,7 @@
 ## This module provides the MixRlnSpamProtection type that can be used with
 ## the mix protocol for per-hop proof generation and verification.
 
-import std/[options, strutils]
+import std/options
 import chronos
 import results
 import chronicles
@@ -272,10 +272,11 @@ method generateProof*(
     sp.lastEpoch = epoch
 
   # Check if we've exceeded message limit
-  if sp.messageIdCounter >= uint(sp.config.userMessageLimit):
-    error "Message limit exceeded",
-      counter = sp.messageIdCounter, limit = sp.config.userMessageLimit
-    return err("Message limit exceeded for current epoch")
+  when not defined(disableClientRateLimit):
+    if sp.messageIdCounter >= uint(sp.config.userMessageLimit):
+      error "Message limit exceeded",
+        counter = sp.messageIdCounter, limit = sp.config.userMessageLimit
+      return err("Message limit exceeded for current epoch")
 
   trace "Calling groupManager.generateProof",
     bindingDataLen = bindingData.len,

@@ -572,138 +572,120 @@ proc getMemberCommitment*(
   except KeyError:
     none(IDCommitment)
 
-# Tree serialization for bootstrap
+# =============================================================================
+# Tree Snapshot Serialization
+# =============================================================================
+#
+# Binary format for tree snapshots (used for bootstrap/sync):
+#
+# ┌─────────────────────────────────────────────────────────────┐
+# │ Header (16 bytes)                                           │
+# ├─────────────────────────────────────────────────────────────┤
+# │ member_count: uint64 (8 bytes, little-endian)               │
+# │ next_index:   uint64 (8 bytes, little-endian)               │
+# ├─────────────────────────────────────────────────────────────┤
+# │ Members (40 bytes each)                                     │
+# ├─────────────────────────────────────────────────────────────┤
+# │ For each member:                                            │
+# │   commitment: 32 bytes (IDCommitment)                       │
+# │   index:      8 bytes (uint64, little-endian)               │
+# └─────────────────────────────────────────────────────────────┘
+
+const
+  SnapshotHeaderSize = 16        # member_count (8) + next_index (8)
+  SnapshotMemberSize = 40        # commitment (32) + index (8)
+
+# Note: writeUint64LE and readUint64LE are imported from bytes_utils via types
 
 proc serializeTreeSnapshot*(gm: OffchainGroupManager): seq[byte] =
-  ## Serialize the current tree state for bootstrap sharing.
-  ## Binary format:
-  ##   - member_count (8 bytes, little-endian)
-  ##   - next_index (8 bytes, little-endian)
-  ##   - for each member:
-  ##     - commitment (32 bytes)
-  ##     - index (8 bytes, little-endian)
-
+  ## Serialize the current membership tree state for bootstrap sharing.
+  ## Returns a binary blob that can be saved to disk or sent over the network.
   let memberCount = gm.membershipByIndex.len
-  let dataSize = 16 + (memberCount * 40) # 8 + 8 + n * (32 + 8)
-  result = newSeq[byte](dataSize)
+  let totalSize = SnapshotHeaderSize + (memberCount * SnapshotMemberSize)
+  result = newSeq[byte](totalSize)
 
   var offset = 0
 
-  # Member count
-  let count = uint64(memberCount)
-  result[offset + 0] = byte(count and 0xFF)
-  result[offset + 1] = byte((count shr 8) and 0xFF)
-  result[offset + 2] = byte((count shr 16) and 0xFF)
-  result[offset + 3] = byte((count shr 24) and 0xFF)
-  result[offset + 4] = byte((count shr 32) and 0xFF)
-  result[offset + 5] = byte((count shr 40) and 0xFF)
-  result[offset + 6] = byte((count shr 48) and 0xFF)
-  result[offset + 7] = byte((count shr 56) and 0xFF)
-  offset += 8
+  # Write header
+  result.writeUint64LE(offset, uint64(memberCount))
+  offset += Uint64ByteSize
 
-  # Next index
-  let nextIdx = gm.nextIndex
-  result[offset + 0] = byte(nextIdx and 0xFF)
-  result[offset + 1] = byte((nextIdx shr 8) and 0xFF)
-  result[offset + 2] = byte((nextIdx shr 16) and 0xFF)
-  result[offset + 3] = byte((nextIdx shr 24) and 0xFF)
-  result[offset + 4] = byte((nextIdx shr 32) and 0xFF)
-  result[offset + 5] = byte((nextIdx shr 40) and 0xFF)
-  result[offset + 6] = byte((nextIdx shr 48) and 0xFF)
-  result[offset + 7] = byte((nextIdx shr 56) and 0xFF)
-  offset += 8
+  result.writeUint64LE(offset, uint64(gm.nextIndex))
+  offset += Uint64ByteSize
 
-  # Members
+  # Write each member entry
   for index, commitment in gm.membershipByIndex:
+    # Write commitment (32 bytes)
     copyMem(addr result[offset], unsafeAddr commitment[0], HashByteSize)
     offset += HashByteSize
 
-    result[offset + 0] = byte(index and 0xFF)
-    result[offset + 1] = byte((index shr 8) and 0xFF)
-    result[offset + 2] = byte((index shr 16) and 0xFF)
-    result[offset + 3] = byte((index shr 24) and 0xFF)
-    result[offset + 4] = byte((index shr 32) and 0xFF)
-    result[offset + 5] = byte((index shr 40) and 0xFF)
-    result[offset + 6] = byte((index shr 48) and 0xFF)
-    result[offset + 7] = byte((index shr 56) and 0xFF)
-    offset += 8
+    # Write index
+    result.writeUint64LE(offset, uint64(index))
+    offset += Uint64ByteSize
 
 proc loadTreeSnapshot*(gm: OffchainGroupManager, data: seq[byte]): RlnResult[void] =
-  ## Load a tree snapshot for bootstrap.
-  if data.len < 16:
-    return err("Invalid snapshot data: too short")
+  ## Load a tree snapshot from binary data.
+  ## This replaces the current tree state with the snapshot contents.
+
+  # Validate minimum size for header
+  if data.len < SnapshotHeaderSize:
+    return err("Invalid snapshot: data too short for header")
 
   var offset = 0
 
-  # Member count
-  let memberCount =
-    uint64(data[offset + 0]) or (uint64(data[offset + 1]) shl 8) or
-    (uint64(data[offset + 2]) shl 16) or (uint64(data[offset + 3]) shl 24) or
-    (uint64(data[offset + 4]) shl 32) or (uint64(data[offset + 5]) shl 40) or
-    (uint64(data[offset + 6]) shl 48) or (uint64(data[offset + 7]) shl 56)
-  offset += 8
+  # Read header
+  let memberCount = data.readUint64LE(offset)
+  offset += Uint64ByteSize
 
-  # Next index
-  let nextIndex =
-    uint64(data[offset + 0]) or (uint64(data[offset + 1]) shl 8) or
-    (uint64(data[offset + 2]) shl 16) or (uint64(data[offset + 3]) shl 24) or
-    (uint64(data[offset + 4]) shl 32) or (uint64(data[offset + 5]) shl 40) or
-    (uint64(data[offset + 6]) shl 48) or (uint64(data[offset + 7]) shl 56)
-  offset += 8
+  let nextIndex = data.readUint64LE(offset)
+  offset += Uint64ByteSize
 
-  trace "Parsed tree snapshot header",
-    memberCount = memberCount,
-    nextIndex = nextIndex
-
-  let expectedSize = 16 + int(memberCount) * 40
+  # Validate total size matches expected
+  let expectedSize = SnapshotHeaderSize + int(memberCount) * SnapshotMemberSize
   if data.len != expectedSize:
     error "Snapshot size mismatch",
-      dataLen = data.len,
-      expectedSize = expectedSize,
-      memberCount = memberCount,
-      nextIndex = nextIndex
-    return err("Invalid snapshot data: size mismatch")
+      actual = data.len, expected = expectedSize, memberCount = memberCount
+    return err("Invalid snapshot: size mismatch (expected " & $expectedSize & ", got " & $data.len & ")")
 
-  # Clear current state
+  trace "Loading tree snapshot", memberCount = memberCount, nextIndex = nextIndex
+
+  # Clear existing state before loading
   gm.membershipByCommitment.clear()
   gm.membershipByIndex.clear()
 
-  # Parse and insert members one by one
+  # Load each member
   for i in 0 ..< memberCount:
+    # Read commitment
     var commitment: IDCommitment
     copyMem(addr commitment[0], unsafeAddr data[offset], HashByteSize)
     offset += HashByteSize
 
-    let index =
-      uint64(data[offset + 0]) or (uint64(data[offset + 1]) shl 8) or
-      (uint64(data[offset + 2]) shl 16) or (uint64(data[offset + 3]) shl 24) or
-      (uint64(data[offset + 4]) shl 32) or (uint64(data[offset + 5]) shl 40) or
-      (uint64(data[offset + 6]) shl 48) or (uint64(data[offset + 7]) shl 56)
-    offset += 8
+    # Read index
+    let index = MembershipIndex(data.readUint64LE(offset))
+    offset += Uint64ByteSize
 
-    # Compute rate commitment = Poseidon(idCommitment, userMessageLimit)
-    # This is the actual leaf value stored in the RLN Merkle tree
+    # Compute rate commitment for the RLN tree
+    # Tree stores: rate_commitment = Poseidon(id_commitment, user_message_limit)
     let rateCommitment = computeRateCommitment(commitment, UserMessageLimit).valueOr:
-      error "Failed to compute rate commitment", index = index, error = error
+      error "Failed to compute rate commitment during snapshot load", index = index
       return err("Failed to compute rate commitment: " & error)
 
-    # Insert into RLN tree at the correct index
-    let insertResult =
-      gm.rlnInstance.insertMemberAt(MembershipIndex(index), rateCommitment)
+    # Insert into RLN Merkle tree
+    let insertResult = gm.rlnInstance.insertMemberAt(index, rateCommitment)
     if insertResult.isErr:
-      error "Failed to insert member from snapshot",
-        index = index, error = insertResult.error
-      return err("Failed to insert member from snapshot: " & insertResult.error)
+      error "Failed to insert member from snapshot", index = index, error = insertResult.error
+      return err("Failed to insert member: " & insertResult.error)
 
-    gm.membershipByCommitment[commitment] = MembershipIndex(index)
-    gm.membershipByIndex[MembershipIndex(index)] = commitment
+    # Update tracking tables
+    gm.membershipByCommitment[commitment] = index
+    gm.membershipByIndex[index] = commitment
 
   gm.nextIndex = MembershipIndex(nextIndex)
 
-  # Update root tracker
+  # Update Merkle root tracker with new tree state
   gm.updateRootTrackerOrLog()
 
-  debug "Loaded tree snapshot", memberCount = memberCount, nextIndex = nextIndex
+  debug "Tree snapshot loaded successfully", memberCount = memberCount, nextIndex = nextIndex
   ok()
 
 proc saveTreeToFile*(gm: OffchainGroupManager, path: string): RlnResult[void] =

@@ -5,7 +5,7 @@
 ## Credential management for RLN membership.
 ## Supports generating new credentials and loading from keystore files.
 
-import std/[json, os, options, strutils]
+import std/[json, os, options]
 import results
 import chronicles
 import nimcrypto/[pbkdf2, rijndael, bcmode, sha2, sysrand]

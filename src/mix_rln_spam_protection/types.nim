@@ -8,6 +8,9 @@ import std/times
 import chronos
 import results
 import ./constants
+import ./bytes_utils
+
+export bytes_utils
 
 type
   # Cryptographic primitives (fixed-size byte arrays)
@@ -136,21 +139,22 @@ type
     Ready ## Plugin is ready for proof generation/verification
     Stopped ## Plugin has been stopped
 
-# Helper functions for epoch calculation
+# =============================================================================
+# Epoch Calculation
+# =============================================================================
+#
+# Epochs are 32-byte arrays with the epoch number stored in the first 8 bytes
+# as little-endian uint64. The remaining 24 bytes are zero-padded.
 
 proc calcEpoch*(timestamp: float64): Epoch =
   ## Calculate the epoch for a given Unix timestamp.
+  ## Epoch number = floor(timestamp / EpochDurationSeconds)
   let epochNum = uint64(timestamp / EpochDurationSeconds)
   result = default(Epoch)
-  # Store as little-endian
-  result[0] = byte(epochNum and 0xFF)
-  result[1] = byte((epochNum shr 8) and 0xFF)
-  result[2] = byte((epochNum shr 16) and 0xFF)
-  result[3] = byte((epochNum shr 24) and 0xFF)
-  result[4] = byte((epochNum shr 32) and 0xFF)
-  result[5] = byte((epochNum shr 40) and 0xFF)
-  result[6] = byte((epochNum shr 48) and 0xFF)
-  result[7] = byte((epochNum shr 56) and 0xFF)
+  # Store epoch number in first 8 bytes as little-endian
+  let epochBytes = epochNum.toBytesLE()
+  for i in 0 ..< Uint64ByteSize:
+    result[i] = epochBytes[i]
 
 proc calcEpoch*(t: Time): Epoch =
   ## Calculate the epoch for a given Time.
@@ -161,11 +165,8 @@ proc currentEpoch*(): Epoch =
   calcEpoch(getTime())
 
 proc epochToUint64*(epoch: Epoch): uint64 =
-  ## Convert an epoch to its numeric value.
-  result =
-    uint64(epoch[0]) or (uint64(epoch[1]) shl 8) or (uint64(epoch[2]) shl 16) or
-    (uint64(epoch[3]) shl 24) or (uint64(epoch[4]) shl 32) or (uint64(epoch[5]) shl 40) or
-    (uint64(epoch[6]) shl 48) or (uint64(epoch[7]) shl 56)
+  ## Convert an epoch to its numeric value (reads first 8 bytes as little-endian).
+  fromBytesLE(epoch)
 
 proc epochDiff*(e1, e2: Epoch): int64 =
   ## Calculate the difference between two epochs.
@@ -176,10 +177,14 @@ proc isEpochValid*(msgEpoch: Epoch, currentEpoch: Epoch): bool =
   let diff = abs(epochDiff(currentEpoch, msgEpoch))
   diff <= MaxEpochGap
 
-# Hex conversion utilities (shared across modules)
+# =============================================================================
+# Hex Conversion Utilities
+# =============================================================================
+# Note: toHex is also available from bytes_utils, but we keep this for
+# backwards compatibility and explicit typing with openArray[byte].
 
 proc toHex*(data: openArray[byte]): string =
-  ## Convert bytes to hex string.
+  ## Convert bytes to lowercase hex string.
   result = newStringOfCap(data.len * 2)
   const hexChars = "0123456789abcdef"
   for b in data:
@@ -218,25 +223,28 @@ proc fromHex*(hex: string): seq[byte] =
 
     result[i] = byte((hiVal shl 4) or loVal)
 
-# Helper functions for witness-based proof generation
+# =============================================================================
+# Field Element Utilities (for witness-based proof generation)
+# =============================================================================
+#
+# Field elements are 32-byte arrays representing values in the BN254 scalar field.
+# Values are stored in little-endian format with zero-padding for unused bytes.
 
 proc uint64ToField*(n: uint64): Field =
-  ## Convert a uint64 to a 32-byte field element in little-endian.
+  ## Convert a uint64 to a 32-byte field element.
+  ## The uint64 is stored in the first 8 bytes (little-endian), rest is zero.
   var output: Field
-  output[0] = byte(n and 0xFF)
-  output[1] = byte((n shr 8) and 0xFF)
-  output[2] = byte((n shr 16) and 0xFF)
-  output[3] = byte((n shr 24) and 0xFF)
-  output[4] = byte((n shr 32) and 0xFF)
-  output[5] = byte((n shr 40) and 0xFF)
-  output[6] = byte((n shr 48) and 0xFF)
-  output[7] = byte((n shr 56) and 0xFF)
+  let bytes = n.toBytesLE()
+  for i in 0 ..< Uint64ByteSize:
+    output[i] = bytes[i]
+  # Remaining bytes are already zero (default)
   return output
 
 proc seqToField*(s: openArray[byte]): Field =
   ## Convert a byte sequence to a 32-byte field element.
+  ## Copies up to 32 bytes; pads with zeros if input is shorter.
   var output: Field
-  let len = min(s.len, 32)
-  for i in 0 ..< len:
+  let copyLen = min(s.len, 32)
+  for i in 0 ..< copyLen:
     output[i] = s[i]
   return output

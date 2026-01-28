@@ -1,15 +1,15 @@
 # Mix RLN Spam Protection Plugin
 
-RLN-based spam protection plugin for libp2p mix networks. This plugin implements [Rate Limiting Nullifiers (RLN)](https://rate-limiting-nullifier.github.io/rln-docs/) for per-hop proof generation and verification in mix networks.
+RLN-based spam protection plugin for libp2p mix networks. This plugin implements [Rate Limiting Nullifiers (RLN)](https://rate-limiting-nullifier.github.io/rln-docs/) to provide proof generation and verification primitives.
 
 ## Overview
 
 This plugin provides:
 
-- **Per-hop proof generation**: Each mix node generates fresh RLN proofs for packets it forwards
+- **RLN proof primitives**: `generateProof(bindingData)` and `verifyProof(proof, bindingData)` methods
 - **Spam detection**: Detects double-signaling (sending more than allowed messages per epoch)
 - **Offchain membership**: Membership managed via logos-messaging content topics (no blockchain required)
-- **Pluggable architecture**: Implements nim-libp2p's `SpamProtection` for easy integration
+- **Pluggable architecture**: Implements nim-libp2p's `SpamProtection` interface for easy integration
 
 ## Architecture
 
@@ -20,7 +20,7 @@ This plugin provides:
 │  SpamProtection (nim-libp2p compatible)                         │
 │    - generateProof(bindingData) → EncodedProofData              │
 │    - verifyProof(proof, bindingData) → bool                     │
-│    - proofSize() → 288 bytes                                    │
+│    - proofSize() → 301 bytes (protobuf-encoded)                 │
 ├─────────────────────────────────────────────────────────────────┤
 │  RLN Core (zerokit v0.9.0 FFI)                                  │
 │    - Proof generation/verification (RLN-v2 format)              │
@@ -50,19 +50,14 @@ This plugin provides:
 This plugin requires the zerokit RLN library (v0.9.0) for proof generation and verification.
 
 ```bash
-# Option 1: Use logos-messaging-nim's built library
-cd logos-messaging-nim
-make librln
-cp librln_v0.9.0.a /path/to/your/project/
-
-# Option 2: Build from source
+# Option 1: Build from source
 git clone https://github.com/vacp2p/zerokit
 cd zerokit
 git checkout v0.9.0
 cargo build --release -p rln
 cp target/release/librln.a /path/to/your/project/
 
-# Option 3: Download prebuilt
+# Option 2: Download prebuilt
 # https://github.com/vacp2p/zerokit/releases/tag/v0.9.0
 ```
 
@@ -89,9 +84,6 @@ import mix_rln_spam_protection
 var config = defaultConfig()
 config.keystorePassword = "my-secure-password"
 
-# Optionally customize RLN identifier (must be same across all nodes!)
-# config.rlnIdentifier = myCustomIdentifier
-
 # Optionally customize content topics for your network
 # config.membershipContentTopic = "/my-app/rln/membership/v1"
 # config.proofMetadataContentTopic = "/my-app/rln/metadata/v1"
@@ -104,7 +96,7 @@ let plugin = newMixRlnSpamProtection(config).valueOr:
 # Initialize (loads/generates credentials)
 await plugin.init()
 
-# Set up logos-messaging integration
+# Set up coordination layer e.g via logos-messaging
 plugin.setPublishCallback(proc(topic: string, data: seq[byte]) {.async.} =
   await logosMessaging.publish(topic, data)
 )
@@ -226,19 +218,12 @@ plugin.groupManager.loadTreeSnapshot(cast[seq[byte]](data))
 
 ## Testing
 
-All 16 tests pass with zerokit v0.9.0:
+Run following command to execute all tests
 
 ```bash
 # Run tests (requires librln.a)
 nim c -r --passL:/path/to/librln.a --passL:-lm tests/test_all.nim
 
-# Test suites:
-# - Constants (3 tests)
-# - Type Serialization (3 tests)
-# - Nullifier Log (4 tests)
-# - Tree Serialization (2 tests)
-# - Credentials (3 tests)
-# - Configuration (2 tests)
 ```
 
 ## References

@@ -43,7 +43,7 @@ proc valid(x: openArray[byte]): bool =
 
 suite "Constants":
   test "Proof size is correct":
-    check RateLimitProofByteSize == 288  # 128 + 32*5
+    check RateLimitProofByteSize == 301  # 288 raw + 13 protobuf overhead
 
   test "Epoch calculation":
     let timestamp = 1700000000.0

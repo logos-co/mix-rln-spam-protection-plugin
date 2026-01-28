@@ -33,7 +33,7 @@ const
   UserMessageLimit* = 100 ## Maximum number of messages a member can send per epoch.
 
   # Root validation
-  AcceptableRootWindowSize* = 50
+  AcceptableRootWindowSize* = 5
     ## Number of past Merkle roots to keep for validation.
     ## Allows verification against slightly stale roots due to propagation delay.
 

@@ -8,7 +8,7 @@
 
 import results, chronicles
 import nimcrypto/keccak as keccak
-import stew/[arrayops, endians2]
+import stew/arrayops
 import ./types
 import ./constants
 
@@ -228,31 +228,45 @@ type RLNInstance* = ref object ## High-level wrapper around the zerokit RLN inst
 
 # Note: RlnResult[T] is defined in types.nim to avoid circular imports
 
+# =============================================================================
+# Credential Key Generation
+# =============================================================================
+#
+# FFI output format (128 bytes total):
+# ┌──────────────────────────────────────────────────────────────────────────┐
+# │ idTrapdoor    (32 bytes) │ idNullifier  (32 bytes)                      │
+# │ idSecretHash  (32 bytes) │ idCommitment (32 bytes)                      │
+# └──────────────────────────────────────────────────────────────────────────┘
+
+const
+  CredentialFieldSize = 32
+  CredentialBufferSize = 4 * CredentialFieldSize  # 128 bytes
+
+proc parseCredentialBuffer(keysBuffer: Buffer): RlnResult[IdentityCredential] =
+  ## Parse the FFI credential buffer into an IdentityCredential.
+  if keysBuffer.len != CredentialBufferSize:
+    return err("Invalid credential buffer length: " & $keysBuffer.len & ", expected " & $CredentialBufferSize)
+
+  let generatedKeys = cast[ptr array[CredentialBufferSize, byte]](keysBuffer.`ptr`)[]
+
+  var cred: IdentityCredential
+  for i in 0 ..< CredentialFieldSize:
+    cred.idTrapdoor[i] = generatedKeys[i + 0 * CredentialFieldSize]
+    cred.idNullifier[i] = generatedKeys[i + 1 * CredentialFieldSize]
+    cred.idSecretHash[i] = generatedKeys[i + 2 * CredentialFieldSize]
+    cred.idCommitment[i] = generatedKeys[i + 3 * CredentialFieldSize]
+
+  ok(cred)
+
 proc membershipKeyGen*(): RlnResult[IdentityCredential] =
   ## Generates an IdentityCredential that can be used for registration.
   ## Returns an error if the key generation fails.
-  ## This matches logos-messaging-nim's membershipKeyGen in wrappers.nim
-  var
-    keysBuffer: Buffer
-    keysBufferPtr = addr(keysBuffer)
-    done = key_gen(keysBufferPtr, true)
+  var keysBuffer: Buffer
 
-  if not done:
-    return err("error in key generation")
+  if not key_gen(addr keysBuffer, true):
+    return err("Key generation FFI call failed")
 
-  if keysBuffer.len != 4 * 32:
-    return err("keysBuffer is of invalid length: " & $keysBuffer.len)
-
-  var generatedKeys = cast[ptr array[4 * 32, byte]](keysBufferPtr.`ptr`)[]
-
-  var cred: IdentityCredential
-  for i in 0 ..< 32:
-    cred.idTrapdoor[i] = generatedKeys[i + 0 * 32]
-    cred.idNullifier[i] = generatedKeys[i + 1 * 32]
-    cred.idSecretHash[i] = generatedKeys[i + 2 * 32]
-    cred.idCommitment[i] = generatedKeys[i + 3 * 32]
-
-  return ok(cred)
+  parseCredentialBuffer(keysBuffer)
 
 proc membershipKeyGen*(seed: openArray[byte]): RlnResult[IdentityCredential] =
   ## Generates a deterministic IdentityCredential from a seed.
@@ -261,25 +275,11 @@ proc membershipKeyGen*(seed: openArray[byte]): RlnResult[IdentityCredential] =
     seedData = @seed
     seedBuffer = seedData.toBuffer()
     keysBuffer: Buffer
-    keysBufferPtr = addr(keysBuffer)
-    done = seeded_key_gen(addr seedBuffer, keysBufferPtr, true)
 
-  if not done:
-    return err("error in seeded key generation")
+  if not seeded_key_gen(addr seedBuffer, addr keysBuffer, true):
+    return err("Seeded key generation FFI call failed")
 
-  if keysBuffer.len != 4 * 32:
-    return err("keysBuffer is of invalid length: " & $keysBuffer.len)
-
-  var generatedKeys = cast[ptr array[4 * 32, byte]](keysBufferPtr.`ptr`)[]
-
-  var cred: IdentityCredential
-  for i in 0 ..< 32:
-    cred.idTrapdoor[i] = generatedKeys[i + 0 * 32]
-    cred.idNullifier[i] = generatedKeys[i + 1 * 32]
-    cred.idSecretHash[i] = generatedKeys[i + 2 * 32]
-    cred.idCommitment[i] = generatedKeys[i + 3 * 32]
-
-  return ok(cred)
+  parseCredentialBuffer(keysBuffer)
 
 # Aliases to match existing API
 proc generateMembershipKey*(): RlnResult[IdentityCredential] =
@@ -385,19 +385,11 @@ proc computeRateCommitment*(
   ## Compute rate commitment = Poseidon(idCommitment, userMessageLimit)
   ## This is the actual leaf value stored in the RLN Merkle tree.
   ## Note: The tree stores rate_commitment, not id_commitment!
-  var limitBytes: array[32, byte]
-  # Convert userMessageLimit to 32-byte little-endian field element
-  limitBytes[0] = byte(userMessageLimit and 0xFF)
-  limitBytes[1] = byte((userMessageLimit shr 8) and 0xFF)
-  limitBytes[2] = byte((userMessageLimit shr 16) and 0xFF)
-  limitBytes[3] = byte((userMessageLimit shr 24) and 0xFF)
-  limitBytes[4] = byte((userMessageLimit shr 32) and 0xFF)
-  limitBytes[5] = byte((userMessageLimit shr 40) and 0xFF)
-  limitBytes[6] = byte((userMessageLimit shr 48) and 0xFF)
-  limitBytes[7] = byte((userMessageLimit shr 56) and 0xFF)
-  # Rest is zero-padded
 
-  let hashResult = poseidonHash(@[@idCommitment, @limitBytes]).valueOr:
+  # Convert userMessageLimit to 32-byte field element (little-endian, zero-padded)
+  let limitField = uint64ToField(userMessageLimit)
+
+  let hashResult = poseidonHash(@[@idCommitment, @limitField]).valueOr:
     return err("Failed to compute rate commitment: " & error)
 
   var rateCommitment: IDCommitment
@@ -485,38 +477,42 @@ proc insertMemberAt*(
 
 proc serialize*(witness: RLNWitnessInput): seq[byte] =
   ## Serializes the RLN witness into a byte array following zerokit's expected format.
-  ## The serialized format includes:
-  ## - identity_secret (32 bytes)
-  ## - user_message_limit (32 bytes)
-  ## - message_id (32 bytes)
-  ## - merkle tree depth (8 bytes, little-endian) = path_elements.len / 32
-  ## - path_elements (each 32 bytes, ordered bottom-to-top)
-  ## - merkle tree depth again (8 bytes, little-endian)
-  ## - identity_path_index (sequence of bits as bytes, 0 = left, 1 = right)
-  ## - x (32 bytes)
-  ## - external_nullifier (32 bytes)
+  ##
+  ## Format:
+  ## ┌────────────────────────────────────────────────────────────────┐
+  ## │ identity_secret      (32 bytes)                               │
+  ## │ user_message_limit   (32 bytes)                               │
+  ## │ message_id           (32 bytes)                               │
+  ## │ depth                (8 bytes, little-endian)                 │
+  ## │ path_elements        (depth * 32 bytes, bottom-to-top)        │
+  ## │ depth                (8 bytes, little-endian, repeated)       │
+  ## │ identity_path_index  (depth bytes, each 0=left or 1=right)    │
+  ## │ x                    (32 bytes, signal hash)                  │
+  ## │ external_nullifier   (32 bytes)                               │
+  ## └────────────────────────────────────────────────────────────────┘
   var buffer: seq[byte]
+
+  # Fixed-size fields
   buffer.add(@(witness.identity_secret))
   buffer.add(@(witness.user_message_limit))
   buffer.add(@(witness.message_id))
 
+  # Merkle tree depth and path elements
   let depth = uint64(witness.path_elements.len div 32)
-  # Depth as 8-byte little-endian
-  for i in 0 ..< 8:
-    buffer.add(byte((depth shr (i * 8)) and 0xFF))
-
-  # Path elements (should be depth * 32 bytes)
+  let depthBytes = depth.toBytesLE()
+  buffer.add(@depthBytes)
   buffer.add(witness.path_elements)
 
-  # Depth again as 8-byte little-endian
-  for i in 0 ..< 8:
-    buffer.add(byte((depth shr (i * 8)) and 0xFF))
+  # Depth repeated (zerokit format requirement)
+  buffer.add(@depthBytes)
 
-  # Identity path index (depth bytes, each 0 or 1)
+  # Identity path index (direction bits through tree)
   buffer.add(witness.identity_path_index)
 
+  # Signal hash and external nullifier
   buffer.add(@(witness.x))
   buffer.add(@(witness.external_nullifier))
+
   return buffer
 
 proc generateRlnProofWithWitness*(
@@ -534,7 +530,7 @@ proc generateRlnProofWithWitness*(
   ## 
   ## This matches waku's OnchainGroupManager approach for reliable proof generation.
 
-  const MerkleTreeDepth = 20 # Standard RLN tree depth
+  # Note: MerkleTreeDepth is imported from constants.nim
 
   # Flush tree to ensure it's synced
   discard flush(instance.ctx)
@@ -614,9 +610,21 @@ proc generateRlnProofWithWitness*(
 
   trace "generate_proof_with_witness FFI succeeded", outputLen = outputBuffer.len
 
-  # Parse output: proof<128> | root<32> | external_nullifier<32> | share_x<32> | share_y<32> | nullifier<32>
-  if outputBuffer.len < 288:
-    return err("Invalid proof output length: " & $outputBuffer.len)
+  # ==========================================================================
+  # Parse FFI output buffer
+  # ==========================================================================
+  # Format: proof<128> | root<32> | external_nullifier<32> | share_x<32> | share_y<32> | nullifier<32>
+  # Total: 288 bytes
+  const
+    ProofOutputSize = 288
+    ProofFieldSize = 128  # zkSNARK proof
+    RootFieldSize = 32
+    ExtNullifierFieldSize = 32
+    ShareFieldSize = 32
+    NullifierFieldSize = 32
+
+  if outputBuffer.len < ProofOutputSize:
+    return err("Invalid proof output length: " & $outputBuffer.len & ", expected " & $ProofOutputSize)
 
   let outputData = cast[ptr UncheckedArray[byte]](outputBuffer.`ptr`)
 
@@ -624,32 +632,31 @@ proc generateRlnProofWithWitness*(
   var offset = 0
 
   # zkSNARK proof (128 bytes)
-  for i in 0 ..< 128:
+  for i in 0 ..< ProofFieldSize:
     proof.proof[i] = outputData[offset + i]
-  offset += 128
+  offset += ProofFieldSize
 
   # Merkle root (32 bytes)
-  for i in 0 ..< 32:
+  for i in 0 ..< RootFieldSize:
     proof.merkleRoot[i] = outputData[offset + i]
-  offset += 32
+  offset += RootFieldSize
 
-  # External nullifier / epoch (32 bytes) - we store epoch in proof
-  for i in 0 ..< 32:
-    proof.epoch[i] = epoch[i]
-  offset += 32
+  # Skip external_nullifier from output (32 bytes) - we use the epoch from input
+  proof.epoch = epoch
+  offset += ExtNullifierFieldSize
 
   # Share X (32 bytes)
-  for i in 0 ..< 32:
+  for i in 0 ..< ShareFieldSize:
     proof.shareX[i] = outputData[offset + i]
-  offset += 32
+  offset += ShareFieldSize
 
   # Share Y (32 bytes)
-  for i in 0 ..< 32:
+  for i in 0 ..< ShareFieldSize:
     proof.shareY[i] = outputData[offset + i]
-  offset += 32
+  offset += ShareFieldSize
 
   # Nullifier (32 bytes)
-  for i in 0 ..< 32:
+  for i in 0 ..< NullifierFieldSize:
     proof.nullifier[i] = outputData[offset + i]
 
   # Verify the proof root matches our current tree root
@@ -689,9 +696,8 @@ proc verifyRlnProof*(
   proofData.add(@(proof.nullifier))
 
   # Signal length (8 bytes little-endian)
-  let sigLen = uint64(signal.len)
-  for i in 0 ..< 8:
-    proofData.add(byte((sigLen shr (i * 8)) and 0xFF))
+  let sigLenBytes = uint64(signal.len).toBytesLE()
+  proofData.add(@sigLenBytes)
 
   # Signal
   proofData.add(@signal)
