@@ -22,6 +22,7 @@ import ../src/mix_rln_spam_protection/types
 import ../src/mix_rln_spam_protection/constants
 import ../src/mix_rln_spam_protection/codec
 import ../src/mix_rln_spam_protection/nullifier_log
+import ../src/mix_rln_spam_protection/rln_interface
 
 # Use std/unittest (testutils/unittests available in logos-messaging-nim context)
 import std/unittest
@@ -330,6 +331,278 @@ suite "Configuration":
     let id = defaultRlnIdentifier()
     # Should have content (from MixRlnIdentifier constant)
     check id.valid()
+
+# =============================================================================
+# SPAM DETECTION AND SECRET RECOVERY TESTS (requires zerokit)
+# =============================================================================
+
+suite "Spam Detection and Secret Recovery":
+  ## These tests verify the core spam protection functionality:
+  ## 1. Duplicate proof detection via nullifier log
+  ## 2. Spam detection when same identity sends different messages in same epoch
+  ## 3. Secret key recovery from spam proofs (for slashing)
+
+  test "Detect spam from duplicate nullifiers and recover secret":
+    ## This test simulates a spammer sending two messages in the same epoch
+    ## with the same messageId, which produces the same nullifier.
+    ## The verifier should detect this as spam and be able to recover the secret.
+
+    # Create RLN instance
+    let rlnInstance = newRLNInstance()
+    check rlnInstance.isOk
+    let rln = rlnInstance.get()
+
+    # Generate credentials for a member (the spammer)
+    let credResult = generateCredentials()
+    check credResult.isOk
+    let spammerCreds = credResult.get()
+
+    # Register spammer in the tree with rate commitment
+    let rateCommitment = computeRateCommitment(spammerCreds.idCommitment, 100)
+    check rateCommitment.isOk
+
+    let insertResult = rln.insertMemberAt(0, rateCommitment.get())
+    check insertResult.isOk
+
+    # Flush tree to ensure it's synced
+    discard flush(rln.ctx)
+
+    # Current epoch
+    let epoch = currentEpoch()
+    let rlnId = defaultRlnIdentifier()
+
+    # Generate two proofs with SAME messageId (0) but DIFFERENT signals
+    # This simulates the spammer sending two different messages in the same epoch
+    let signal1 = @[byte(1), 2, 3, 4]  # First message
+    let signal2 = @[byte(5), 6, 7, 8]  # Second message (spam)
+
+    let proof1Result = rln.generateRlnProofWithWitness(
+      spammerCreds, 0, epoch, rlnId, signal1, messageId = 0, userMessageLimit = 100
+    )
+    check proof1Result.isOk
+    let proof1 = proof1Result.get()
+
+    let proof2Result = rln.generateRlnProofWithWitness(
+      spammerCreds, 0, epoch, rlnId, signal2, messageId = 0, userMessageLimit = 100
+    )
+    check proof2Result.isOk
+    let proof2 = proof2Result.get()
+
+    # Both proofs should have the SAME nullifier (since same identity, same epoch, same messageId)
+    check proof1.nullifier == proof2.nullifier
+
+    # But different share values (since different signals produce different x values)
+    # The shares are derived from Shamir secret sharing where x = signal_hash
+    # So different signals produce different shareX and shareY
+
+    # Create nullifier log and check for spam
+    let nullifierLog = newNullifierLog()
+
+    # Compute external nullifier for the log
+    let extNullifier = computeExternalNullifier(epoch, rlnId)
+    check extNullifier.isOk
+
+    # First proof - should be valid (not spam)
+    let metadata1 = ProofMetadata(
+      nullifier: proof1.nullifier,
+      shareX: proof1.shareX,
+      shareY: proof1.shareY,
+      externalNullifier: extNullifier.get(),
+    )
+    let result1 = nullifierLog.checkAndInsert(metadata1)
+    check not result1.isSpam
+    check not result1.isDuplicate
+
+    # Second proof with SAME nullifier but DIFFERENT shares - should be detected as SPAM
+    let metadata2 = ProofMetadata(
+      nullifier: proof2.nullifier,
+      shareX: proof2.shareX,
+      shareY: proof2.shareY,
+      externalNullifier: extNullifier.get(),
+    )
+    let result2 = nullifierLog.checkAndInsert(metadata2)
+
+    # This should be spam (same nullifier, different shares)
+    check result2.isSpam
+    check result2.conflictingEntry.isSome
+
+    # Now recover the secret from the two spam proofs
+    let recoveredSecret = rln.recoverSecret(proof1, proof2)
+    check recoveredSecret.isOk
+
+    # The recovered secret should match the spammer's idSecretHash
+    check recoveredSecret.get() == spammerCreds.idSecretHash
+
+    echo "  ✓ Spam detected and secret recovered successfully!"
+    echo "    Spammer's idSecretHash: ", spammerCreds.idSecretHash.toHex()[0..15], "..."
+    echo "    Recovered secret:       ", recoveredSecret.get().toHex()[0..15], "..."
+
+  test "Different messageIds produce different nullifiers (no spam)":
+    ## This test verifies that using different messageIds within the rate limit
+    ## produces different nullifiers and is NOT detected as spam.
+
+    # Create RLN instance
+    let rlnInstance = newRLNInstance()
+    check rlnInstance.isOk
+    let rln = rlnInstance.get()
+
+    # Generate credentials
+    let credResult = generateCredentials()
+    check credResult.isOk
+    let creds = credResult.get()
+
+    # Register member
+    let rateCommitment = computeRateCommitment(creds.idCommitment, 100)
+    check rateCommitment.isOk
+    let insertResult = rln.insertMemberAt(0, rateCommitment.get())
+    check insertResult.isOk
+
+    # Flush tree
+    discard flush(rln.ctx)
+
+    # Current epoch
+    let epoch = currentEpoch()
+    let rlnId = defaultRlnIdentifier()
+
+    # Generate two proofs with DIFFERENT messageIds (legitimate usage)
+    let signal1 = @[byte(1), 2, 3, 4]
+    let signal2 = @[byte(5), 6, 7, 8]
+
+    let proof1Result = rln.generateRlnProofWithWitness(
+      creds, 0, epoch, rlnId, signal1, messageId = 0, userMessageLimit = 100
+    )
+    check proof1Result.isOk
+    let proof1 = proof1Result.get()
+
+    let proof2Result = rln.generateRlnProofWithWitness(
+      creds, 0, epoch, rlnId, signal2, messageId = 1, userMessageLimit = 100
+    )
+    check proof2Result.isOk
+    let proof2 = proof2Result.get()
+
+    # Different messageIds should produce DIFFERENT nullifiers
+    check proof1.nullifier != proof2.nullifier
+
+    # Neither should be detected as spam
+    let nullifierLog = newNullifierLog()
+    let extNullifier = computeExternalNullifier(epoch, rlnId)
+    check extNullifier.isOk
+
+    let metadata1 = ProofMetadata(
+      nullifier: proof1.nullifier,
+      shareX: proof1.shareX,
+      shareY: proof1.shareY,
+      externalNullifier: extNullifier.get(),
+    )
+    let result1 = nullifierLog.checkAndInsert(metadata1)
+    check not result1.isSpam
+    check not result1.isDuplicate
+
+    let metadata2 = ProofMetadata(
+      nullifier: proof2.nullifier,
+      shareX: proof2.shareX,
+      shareY: proof2.shareY,
+      externalNullifier: extNullifier.get(),
+    )
+    let result2 = nullifierLog.checkAndInsert(metadata2)
+    check not result2.isSpam
+    check not result2.isDuplicate
+
+    echo "  ✓ Different messageIds correctly produce different nullifiers (no spam)"
+
+  test "Verify proofs are valid before spam detection":
+    ## This test ensures the generated proofs are cryptographically valid.
+
+    # Create RLN instance
+    let rlnInstance = newRLNInstance()
+    check rlnInstance.isOk
+    let rln = rlnInstance.get()
+
+    # Generate credentials
+    let credResult = generateCredentials()
+    check credResult.isOk
+    let creds = credResult.get()
+
+    # Register member
+    let rateCommitment = computeRateCommitment(creds.idCommitment, 100)
+    check rateCommitment.isOk
+    let insertResult = rln.insertMemberAt(0, rateCommitment.get())
+    check insertResult.isOk
+
+    # Flush tree
+    discard flush(rln.ctx)
+
+    let epoch = currentEpoch()
+    let rlnId = defaultRlnIdentifier()
+    let signal = @[byte(1), 2, 3, 4, 5]
+
+    # Generate proof
+    let proofResult = rln.generateRlnProofWithWitness(
+      creds, 0, epoch, rlnId, signal, messageId = 0, userMessageLimit = 100
+    )
+    check proofResult.isOk
+    let proof = proofResult.get()
+
+    # Get current root for verification
+    let currentRoot = rln.getMerkleRoot()
+    check currentRoot.isOk
+
+    # Verify the proof is cryptographically valid
+    let verifyResult = rln.verifyRlnProof(
+      proof, rlnId, signal, validRoots = @[currentRoot.get()]
+    )
+    check verifyResult.isOk
+    check verifyResult.get() == true
+
+    echo "  ✓ Proof verification successful"
+
+  test "Full spam protection flow with MixRlnSpamProtection":
+    ## Integration test using the full MixRlnSpamProtection interface.
+
+    # Create config
+    var config = defaultConfig()
+    config.userMessageLimit = 100
+
+    # Create spam protection instance
+    let spResult = newMixRlnSpamProtection(config)
+    check spResult.isOk
+    let sp = spResult.get()
+
+    # Initialize
+    let initResult = waitFor sp.init()
+    check initResult.isOk
+
+    # Register self
+    let registerResult = waitFor sp.registerSelf()
+    check registerResult.isOk
+    let memberIndex = registerResult.get()
+
+    # Start the plugin
+    let startResult = waitFor sp.start()
+    check startResult.isOk
+
+    check sp.isReady()
+
+    # Generate a proof using the high-level interface
+    let bindingData = @[byte(10), 20, 30, 40, 50]
+    let proofResult = sp.generateProof(bindingData)
+    check proofResult.isOk
+    let proofBytes = proofResult.get()
+
+    # Verify the proof
+    let verifyResult = sp.verifyProof(proofBytes, bindingData)
+    check verifyResult.isOk
+    check verifyResult.get() == true
+
+    # Same proof verified again should be detected as duplicate
+    let verifyResult2 = sp.verifyProof(proofBytes, bindingData)
+    check verifyResult2.isOk
+    check verifyResult2.get() == false  # Duplicate should return false
+
+    # Cleanup
+    waitFor sp.stop()
+
+    echo "  ✓ Full spam protection flow completed successfully"
 
 # Main test runner
 when isMainModule:
