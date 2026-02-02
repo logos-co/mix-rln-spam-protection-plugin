@@ -523,11 +523,13 @@ proc generateRlnProofWithWitness*(
     rlnIdentifier: RlnIdentifier,
     signal: openArray[byte],
     messageId: uint = 0,
+    userMessageLimit: uint64 = UserMessageLimit,
 ): RlnResult[RateLimitProof] =
   ## Generate an RLN proof using explicit Merkle proof (witness-based).
   ## This bypasses zerokit's internal Merkle cache by fetching the proof
   ## explicitly and using generate_proof_with_witness FFI.
-  ## 
+  ## userMessageLimit must match the value used for rate commitment in the tree.
+  ##
   ## This matches waku's OnchainGroupManager approach for reliable proof generation.
 
   # Note: MerkleTreeDepth is imported from constants.nim
@@ -582,7 +584,7 @@ proc generateRlnProofWithWitness*(
   # Build the witness input
   let witness = RLNWitnessInput(
     identity_secret: seqToField(@(credential.idSecretHash)),
-    user_message_limit: uint64ToField(uint64(UserMessageLimit)),
+    user_message_limit: uint64ToField(userMessageLimit),
     message_id: uint64ToField(uint64(messageId)),
     path_elements: pathElements,
     identity_path_index: identityPathIndex,

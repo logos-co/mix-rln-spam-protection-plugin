@@ -18,7 +18,8 @@
 ##   message MembershipUpdate {
 ##     uint32 action = 1;
 ##     bytes id_commitment = 2;
-##     uint64 index = 3;
+##     uint64 user_message_limit = 3;
+##     uint64 index = 4;
 ##   }
 
 {.push raises: [].}
@@ -100,7 +101,8 @@ proc encode*(update: MembershipUpdate): ProtoBuffer =
 
   buf.write3(1, uint32(ord(update.action)))
   buf.write3(2, @(update.idCommitment))
-  buf.write3(3, update.index)
+  buf.write3(3, update.userMessageLimit)
+  buf.write3(4, update.index)
   buf.finish3()
 
   buf
@@ -124,8 +126,14 @@ proc decode*(T: type MembershipUpdate, buffer: seq[byte]): ProtobufResult[T] =
     return err(ProtobufError.invalidLengthField("id_commitment"))
   copyMem(addr update.idCommitment[0], addr idCommitment[0], HashByteSize)
 
+  var userMessageLimit: uint64
+  if not ?pb.getField(3, userMessageLimit):
+    # Default to 100 for backward compatibility
+    userMessageLimit = UserMessageLimit
+  update.userMessageLimit = userMessageLimit
+
   var index: uint64
-  if not ?pb.getField(3, index):
+  if not ?pb.getField(4, index):
     return err(ProtobufError.missingRequiredField("index"))
   update.index = index
 

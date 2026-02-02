@@ -181,6 +181,6 @@ proc formatMembershipUpdate*(update: MembershipUpdate): string =
     of MembershipAction.Remove: "REMOVE"
 
   result = actionStr & " member at index " & $update.index &
-           " (commitment: " & update.idCommitment[0..7].toHex() & "...)"
+           " (idCommitment: " & update.idCommitment[0..7].toHex() & "...)"
 
 # Note: toHex is imported from types module via spam_protection

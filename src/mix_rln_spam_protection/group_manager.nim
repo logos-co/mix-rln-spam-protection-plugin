@@ -60,14 +60,19 @@ type
     onWithdraw: Option[OnWithdrawCallback]
     isInitialized*: bool
     isSynced*: bool
+    userMessageLimit*: uint64 ## Max messages per epoch for this group
 
   # Offchain group manager using content-topic propagation
   OffchainGroupManager* = ref object of GroupManager
     ## Group manager that propagates membership via logos-messaging content topics.
     ## Membership additions and deletions are broadcast to all nodes.
     publishCallback: Option[PublishCallback]
-    membershipByCommitment: Table[IDCommitment, MembershipIndex]
-    membershipByIndex: Table[MembershipIndex, IDCommitment]
+    membershipByIdCommitment: Table[IDCommitment, MembershipIndex] ## idCommitment -> index (for spam recovery)
+    membershipByIndex: Table[MembershipIndex, IDCommitment] ## index -> idCommitment
+    # We track per-user rate limits because the Merkle tree stores rateCommitment = Poseidon(idCommitment, userMessageLimit),
+    # not the raw userMessageLimit. When serializing tree snapshots, we need the original userMessageLimit to correctly
+    # recompute rateCommitment on load. Without this, we'd have to assume all members use the same limit.
+    rateLimitByIdCommitment: Table[IDCommitment, uint64] ## idCommitment -> userMessageLimit
     nextIndex: MembershipIndex
     membershipContentTopic*: string ## Content topic for membership updates
 
@@ -194,7 +199,7 @@ method generateProof*(
     return err("Failed to get leaf at membership index: " & error)
 
   let expectedRateCommitment = computeRateCommitment(
-    creds.idCommitment, UserMessageLimit
+    creds.idCommitment, gm.userMessageLimit
   ).valueOr:
     return err("Failed to compute expected rate commitment: " & error)
 
@@ -225,7 +230,7 @@ method generateProof*(
   # This explicitly fetches the Merkle proof and passes it to zerokit,
   # bypassing the internal cache that may be stale
   let proofResult = gm.rlnInstance.generateRlnProofWithWitness(
-    creds, index, epoch, rlnIdentifier, signal, messageId
+    creds, index, epoch, rlnIdentifier, signal, messageId, gm.userMessageLimit
   )
 
   if proofResult.isErr:
@@ -269,10 +274,13 @@ proc setOnWithdraw*(gm: GroupManager, callback: OnWithdrawCallback) =
 # OffchainGroupManager implementation
 
 proc newOffchainGroupManager*(
-    rlnInstance: RLNInstance, membershipContentTopic: string = MembershipContentTopic
+    rlnInstance: RLNInstance,
+    membershipContentTopic: string = MembershipContentTopic,
+    userMessageLimit: uint64 = UserMessageLimit,
 ): OffchainGroupManager =
   ## Create a new offchain group manager.
   ## The membershipContentTopic can be customized for different networks.
+  ## userMessageLimit sets the max messages per epoch (must match network-wide setting).
   OffchainGroupManager(
     rlnInstance: rlnInstance,
     credentials: none(IdentityCredential),
@@ -282,9 +290,11 @@ proc newOffchainGroupManager*(
     onWithdraw: none(OnWithdrawCallback),
     isInitialized: false,
     isSynced: false,
+    userMessageLimit: userMessageLimit,
     publishCallback: none(PublishCallback),
-    membershipByCommitment: initTable[IDCommitment, MembershipIndex](),
+    membershipByIdCommitment: initTable[IDCommitment, MembershipIndex](),
     membershipByIndex: initTable[MembershipIndex, IDCommitment](),
+    rateLimitByIdCommitment: initTable[IDCommitment, uint64](),
     nextIndex: 0,
     membershipContentTopic: membershipContentTopic,
   )
@@ -324,16 +334,26 @@ method stop*(gm: OffchainGroupManager): Future[void] {.async.} =
   info "Offchain group manager stopped"
 
 proc restoreMemberFromKeystore*(
-    gm: OffchainGroupManager, commitment: IDCommitment, index: MembershipIndex
+    gm: OffchainGroupManager,
+    commitment: IDCommitment,
+    index: MembershipIndex,
+    userMessageLimit: uint64 = 0,
 ): RlnResult[void] =
   ## Restore a member from keystore into the tree and membership tables.
   ## This is used when loading credentials with an existing index.
+  ## If userMessageLimit is 0, uses the node's configured default.
   if not gm.isInitialized:
     return err("Group manager not initialized")
 
+  let memberLimit =
+    if userMessageLimit > 0:
+      userMessageLimit
+    else:
+      gm.userMessageLimit
+
   # Compute rate commitment = Poseidon(idCommitment, userMessageLimit)
   # This is the actual leaf value stored in the RLN Merkle tree
-  let rateCommitment = computeRateCommitment(commitment, UserMessageLimit).valueOr:
+  let rateCommitment = computeRateCommitment(commitment, memberLimit).valueOr:
     return err("Failed to compute rate commitment: " & error)
 
   # Insert into RLN tree at the stored index
@@ -341,59 +361,67 @@ proc restoreMemberFromKeystore*(
   if insertResult.isErr:
     return err("Failed to insert member at stored index: " & insertResult.error)
 
-  # Update local tracking
-  gm.membershipByCommitment[commitment] = index
+  # Update local tracking - track by idCommitment for spam recovery
+  gm.membershipByIdCommitment[commitment] = index
   gm.membershipByIndex[index] = commitment
+  gm.rateLimitByIdCommitment[commitment] = memberLimit
 
   # Update nextIndex if needed
   if index >= gm.nextIndex:
     gm.nextIndex = index + 1
 
-  info "Restored member from keystore", index = index
+  info "Restored member from keystore", index = index, userMessageLimit = memberLimit
   ok()
 
-proc hasMember*(gm: OffchainGroupManager, commitment: IDCommitment): bool =
-  ## Check if a member with the given commitment is already in the tree.
-  gm.membershipByCommitment.hasKey(commitment)
+proc hasMemberByIdCommitment*(
+    gm: OffchainGroupManager, idCommitment: IDCommitment
+): bool =
+  ## Check if a member with the given identity commitment is already registered.
+  gm.membershipByIdCommitment.hasKey(idCommitment)
 
 method register*(
     gm: OffchainGroupManager, commitment: IDCommitment
 ): Future[RlnResult[MembershipIndex]] {.async.} =
-  ## Register a new external member.
+  ## Register a new external member (by idCommitment).
+  ## Computes rateCommitment using the node's configured userMessageLimit.
   if not gm.isInitialized:
     return err("Group manager not initialized")
 
-  # Check if already registered
-  if gm.membershipByCommitment.hasKey(commitment):
-    return err("Commitment already registered")
+  # Check if already registered by idCommitment
+  if gm.membershipByIdCommitment.hasKey(commitment):
+    return err("Member already registered")
+
+  # Compute rate commitment = Poseidon(idCommitment, userMessageLimit)
+  # This is the actual leaf value stored in the RLN Merkle tree
+  let rateCommitment = computeRateCommitment(commitment, gm.userMessageLimit).valueOr:
+    return err("Failed to compute rate commitment: " & error)
 
   let index = gm.nextIndex
   trace "Registering member", index = index
   gm.nextIndex += 1
 
-  # Compute rate commitment = Poseidon(idCommitment, userMessageLimit)
-  # This is the actual leaf value stored in the RLN Merkle tree
-  let rateCommitment = computeRateCommitment(commitment, UserMessageLimit).valueOr:
-    return err("Failed to compute rate commitment: " & error)
-
-  # Insert into RLN tree
+  # Insert rateCommitment into RLN tree (this is the actual leaf value)
   let insertResult = gm.rlnInstance.insertMemberAt(index, rateCommitment)
   if insertResult.isErr:
     return err("Failed to insert member: " & insertResult.error)
 
-  # Update local tracking
-  gm.membershipByCommitment[commitment] = index
+  # Update local tracking - track by idCommitment for spam recovery
+  gm.membershipByIdCommitment[commitment] = index
   gm.membershipByIndex[index] = commitment
+  gm.rateLimitByIdCommitment[commitment] = gm.userMessageLimit
 
   trace "Member added to local tables", index = index
 
   # Update root tracker
   gm.updateRootTrackerOrLog()
 
-  # Broadcast membership update
+  # Broadcast membership update with idCommitment + userMessageLimit (like waku-rln-relay)
   if gm.publishCallback.isSome:
     let update = MembershipUpdate(
-      action: MembershipAction.Add, idCommitment: commitment, index: index
+      action: MembershipAction.Add,
+      idCommitment: commitment,
+      userMessageLimit: gm.userMessageLimit,
+      index: index,
     )
     let data = update.toBytes()
     await gm.publishCallback.get()(gm.membershipContentTopic, data)
@@ -403,6 +431,57 @@ method register*(
     await gm.onRegister.get()(commitment, index)
 
   debug "Member registered", index = index
+  ok(index)
+
+proc registerWithLimit*(
+    gm: OffchainGroupManager, commitment: IDCommitment, userMessageLimit: uint64
+): Future[RlnResult[MembershipIndex]] {.async.} =
+  ## Register a new external member with a specific rate limit.
+  ## Used for setup scripts where different members have different limits.
+  if not gm.isInitialized:
+    return err("Group manager not initialized")
+
+  # Check if already registered by idCommitment
+  if gm.membershipByIdCommitment.hasKey(commitment):
+    return err("Member already registered")
+
+  # Compute rate commitment = Poseidon(idCommitment, userMessageLimit)
+  let rateCommitment = computeRateCommitment(commitment, userMessageLimit).valueOr:
+    return err("Failed to compute rate commitment: " & error)
+
+  let index = gm.nextIndex
+  trace "Registering member with custom limit", index = index, userMessageLimit = userMessageLimit
+  gm.nextIndex += 1
+
+  # Insert rateCommitment into RLN tree
+  let insertResult = gm.rlnInstance.insertMemberAt(index, rateCommitment)
+  if insertResult.isErr:
+    return err("Failed to insert member: " & insertResult.error)
+
+  # Update local tracking
+  gm.membershipByIdCommitment[commitment] = index
+  gm.membershipByIndex[index] = commitment
+  gm.rateLimitByIdCommitment[commitment] = userMessageLimit
+
+  # Update root tracker
+  gm.updateRootTrackerOrLog()
+
+  # Broadcast membership update with the specific rate limit
+  if gm.publishCallback.isSome:
+    let update = MembershipUpdate(
+      action: MembershipAction.Add,
+      idCommitment: commitment,
+      userMessageLimit: userMessageLimit,
+      index: index,
+    )
+    let data = update.toBytes()
+    await gm.publishCallback.get()(gm.membershipContentTopic, data)
+
+  # Call callback
+  if gm.onRegister.isSome:
+    await gm.onRegister.get()(commitment, index)
+
+  debug "Member registered with custom limit", index = index, userMessageLimit = userMessageLimit
   ok(index)
 
 method register*(
@@ -436,16 +515,22 @@ method withdraw*(
   if not gm.membershipByIndex.hasKey(index):
     return err("Member not found at index")
 
-  let commitment = gm.membershipByIndex[index]
+  let idCommitment = gm.membershipByIndex[index]
 
   # Delete from RLN tree
   let deleteResult = gm.rlnInstance.removeMember(index)
   if deleteResult.isErr:
     return err("Failed to delete member: " & deleteResult.error)
 
+  # Get the member's rate limit before deleting (for broadcast)
+  let memberRateLimit = gm.rateLimitByIdCommitment.getOrDefault(
+    idCommitment, gm.userMessageLimit
+  )
+
   # Update local tracking
-  gm.membershipByCommitment.del(commitment)
+  gm.membershipByIdCommitment.del(idCommitment)
   gm.membershipByIndex.del(index)
+  gm.rateLimitByIdCommitment.del(idCommitment)
 
   # Update root tracker
   gm.updateRootTrackerOrLog()
@@ -453,14 +538,17 @@ method withdraw*(
   # Broadcast membership update
   if gm.publishCallback.isSome:
     let update = MembershipUpdate(
-      action: MembershipAction.Remove, idCommitment: commitment, index: index
+      action: MembershipAction.Remove,
+      idCommitment: idCommitment,
+      userMessageLimit: memberRateLimit,
+      index: index,
     )
     let data = update.toBytes()
     await gm.publishCallback.get()(gm.membershipContentTopic, data)
 
   # Call callback
   if gm.onWithdraw.isSome:
-    await gm.onWithdraw.get()(commitment, index)
+    await gm.onWithdraw.get()(idCommitment, index)
 
   # Check if we withdrew ourselves
   if gm.membershipIndex.isSome and gm.membershipIndex.get() == index:
@@ -476,29 +564,33 @@ proc handleMembershipUpdate*(
 ): Future[RlnResult[void]] {.async.} =
   ## Handle a membership update received from the network.
   ## This is called when receiving updates on the membership content topic.
+  ## Update contains idCommitment + userMessageLimit; we compute rateCommitment for tree.
   if not gm.isInitialized:
     return err("Group manager not initialized")
 
   case update.action
   of MembershipAction.Add:
-    # Check if already have this member
-    if gm.membershipByCommitment.hasKey(update.idCommitment):
+    # Check if already have this member (by idCommitment)
+    if gm.membershipByIdCommitment.hasKey(update.idCommitment):
       # Already have it, skip
       return ok()
 
-    # Compute rate commitment = Poseidon(idCommitment, userMessageLimit)
+    # Compute rateCommitment = Poseidon(idCommitment, userMessageLimit)
     # This is the actual leaf value stored in the RLN Merkle tree
-    let rateCommitment = computeRateCommitment(update.idCommitment, UserMessageLimit).valueOr:
+    let rateCommitment = computeRateCommitment(
+      update.idCommitment, update.userMessageLimit
+    ).valueOr:
       return err("Failed to compute rate commitment: " & error)
 
-    # Insert into RLN tree at the specified index
+    # Insert rateCommitment into RLN tree
     let insertResult = gm.rlnInstance.insertMemberAt(update.index, rateCommitment)
     if insertResult.isErr:
       return err("Failed to insert member from update: " & insertResult.error)
 
-    # Update local tracking
-    gm.membershipByCommitment[update.idCommitment] = update.index
+    # Update local tracking - track by idCommitment for spam recovery
+    gm.membershipByIdCommitment[update.idCommitment] = update.index
     gm.membershipByIndex[update.index] = update.idCommitment
+    gm.rateLimitByIdCommitment[update.idCommitment] = update.userMessageLimit
 
     # Update next index if needed
     if update.index >= gm.nextIndex:
@@ -511,7 +603,8 @@ proc handleMembershipUpdate*(
     if gm.onRegister.isSome:
       await gm.onRegister.get()(update.idCommitment, update.index)
 
-    debug "Member added from network update", index = update.index
+    debug "Member added from network update",
+      index = update.index, userMessageLimit = update.userMessageLimit
   of MembershipAction.Remove:
     if not gm.membershipByIndex.hasKey(update.index):
       # Don't have this member, skip
@@ -523,16 +616,17 @@ proc handleMembershipUpdate*(
       return err("Failed to delete member from update: " & deleteResult.error)
 
     # Update local tracking
-    let commitment = gm.membershipByIndex[update.index]
-    gm.membershipByCommitment.del(commitment)
+    let idCommitment = gm.membershipByIndex[update.index]
+    gm.membershipByIdCommitment.del(idCommitment)
     gm.membershipByIndex.del(update.index)
+    gm.rateLimitByIdCommitment.del(idCommitment)
 
     # Update root tracker
     gm.updateRootTrackerOrLog()
 
     # Call callback
     if gm.onWithdraw.isSome:
-      await gm.onWithdraw.get()(commitment, update.index)
+      await gm.onWithdraw.get()(idCommitment, update.index)
 
     # Check if we were removed
     if gm.membershipIndex.isSome and gm.membershipIndex.get() == update.index:
@@ -548,22 +642,22 @@ proc getMemberCount*(gm: OffchainGroupManager): int =
   ## Get the number of registered members.
   gm.membershipByIndex.len
 
-proc getMemberIndex*(
-    gm: OffchainGroupManager, commitment: IDCommitment
+proc getMemberIndexByIdCommitment*(
+    gm: OffchainGroupManager, idCommitment: IDCommitment
 ): Option[MembershipIndex] {.raises: [].} =
-  ## Get the index of a member by commitment.
+  ## Get the index of a member by idCommitment.
   try:
-    if gm.membershipByCommitment.hasKey(commitment):
-      some(gm.membershipByCommitment[commitment])
+    if gm.membershipByIdCommitment.hasKey(idCommitment):
+      some(gm.membershipByIdCommitment[idCommitment])
     else:
       none(MembershipIndex)
   except KeyError:
     none(MembershipIndex)
 
-proc getMemberCommitment*(
+proc getMemberIdCommitment*(
     gm: OffchainGroupManager, index: MembershipIndex
 ): Option[IDCommitment] {.raises: [].} =
-  ## Get the commitment of a member by index.
+  ## Get the identity commitment of a member by index.
   try:
     if gm.membershipByIndex.hasKey(index):
       some(gm.membershipByIndex[index])
@@ -571,6 +665,13 @@ proc getMemberCommitment*(
       none(IDCommitment)
   except KeyError:
     none(IDCommitment)
+
+proc getMemberRateLimit*(
+    gm: OffchainGroupManager, idCommitment: IDCommitment
+): uint64 {.raises: [].} =
+  ## Get the rate limit of a member by idCommitment.
+  ## Returns the node's default userMessageLimit if not found.
+  gm.rateLimitByIdCommitment.getOrDefault(idCommitment, gm.userMessageLimit)
 
 # =============================================================================
 # Tree Snapshot Serialization
@@ -584,16 +685,17 @@ proc getMemberCommitment*(
 # │ member_count: uint64 (8 bytes, little-endian)               │
 # │ next_index:   uint64 (8 bytes, little-endian)               │
 # ├─────────────────────────────────────────────────────────────┤
-# │ Members (40 bytes each)                                     │
+# │ Members (48 bytes each)                                     │
 # ├─────────────────────────────────────────────────────────────┤
 # │ For each member:                                            │
-# │   commitment: 32 bytes (IDCommitment)                       │
-# │   index:      8 bytes (uint64, little-endian)               │
+# │   commitment:        32 bytes (IDCommitment)                │
+# │   index:             8 bytes (uint64, little-endian)        │
+# │   userMessageLimit:  8 bytes (uint64, little-endian)        │
 # └─────────────────────────────────────────────────────────────┘
 
 const
   SnapshotHeaderSize = 16        # member_count (8) + next_index (8)
-  SnapshotMemberSize = 40        # commitment (32) + index (8)
+  SnapshotMemberSize = 48        # commitment (32) + index (8) + userMessageLimit (8)
 
 # Note: writeUint64LE and readUint64LE are imported from bytes_utils via types
 
@@ -623,6 +725,13 @@ proc serializeTreeSnapshot*(gm: OffchainGroupManager): seq[byte] =
     result.writeUint64LE(offset, uint64(index))
     offset += Uint64ByteSize
 
+    # Write userMessageLimit
+    let rateLimit = gm.rateLimitByIdCommitment.getOrDefault(
+      commitment, gm.userMessageLimit
+    )
+    result.writeUint64LE(offset, rateLimit)
+    offset += Uint64ByteSize
+
 proc loadTreeSnapshot*(gm: OffchainGroupManager, data: seq[byte]): RlnResult[void] =
   ## Load a tree snapshot from binary data.
   ## This replaces the current tree state with the snapshot contents.
@@ -650,23 +759,28 @@ proc loadTreeSnapshot*(gm: OffchainGroupManager, data: seq[byte]): RlnResult[voi
   trace "Loading tree snapshot", memberCount = memberCount, nextIndex = nextIndex
 
   # Clear existing state before loading
-  gm.membershipByCommitment.clear()
+  gm.membershipByIdCommitment.clear()
   gm.membershipByIndex.clear()
+  gm.rateLimitByIdCommitment.clear()
 
   # Load each member
   for i in 0 ..< memberCount:
-    # Read commitment
-    var commitment: IDCommitment
-    copyMem(addr commitment[0], unsafeAddr data[offset], HashByteSize)
+    # Read idCommitment
+    var idCommitment: IDCommitment
+    copyMem(addr idCommitment[0], unsafeAddr data[offset], HashByteSize)
     offset += HashByteSize
 
     # Read index
     let index = MembershipIndex(data.readUint64LE(offset))
     offset += Uint64ByteSize
 
-    # Compute rate commitment for the RLN tree
+    # Read userMessageLimit
+    let userMessageLimit = data.readUint64LE(offset)
+    offset += Uint64ByteSize
+
+    # Compute rate commitment for the RLN tree using the stored userMessageLimit
     # Tree stores: rate_commitment = Poseidon(id_commitment, user_message_limit)
-    let rateCommitment = computeRateCommitment(commitment, UserMessageLimit).valueOr:
+    let rateCommitment = computeRateCommitment(idCommitment, userMessageLimit).valueOr:
       error "Failed to compute rate commitment during snapshot load", index = index
       return err("Failed to compute rate commitment: " & error)
 
@@ -676,9 +790,10 @@ proc loadTreeSnapshot*(gm: OffchainGroupManager, data: seq[byte]): RlnResult[voi
       error "Failed to insert member from snapshot", index = index, error = insertResult.error
       return err("Failed to insert member: " & insertResult.error)
 
-    # Update tracking tables
-    gm.membershipByCommitment[commitment] = index
-    gm.membershipByIndex[index] = commitment
+    # Update tracking tables - track by idCommitment for spam recovery
+    gm.membershipByIdCommitment[idCommitment] = index
+    gm.membershipByIndex[index] = idCommitment
+    gm.rateLimitByIdCommitment[idCommitment] = userMessageLimit
 
   gm.nextIndex = MembershipIndex(nextIndex)
 

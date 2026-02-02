@@ -96,8 +96,10 @@ proc newMixRlnSpamProtection*(config: MixRlnConfig): RlnResult[MixRlnSpamProtect
   let rlnInstance = newRLNInstance(config.rlnResourcesPath).valueOr:
     return err("Failed to create RLN instance: " & error)
 
-  # Create group manager with configured content topic
-  let groupManager = newOffchainGroupManager(rlnInstance, config.membershipContentTopic)
+  # Create group manager with configured content topic and message limit
+  let groupManager = newOffchainGroupManager(
+    rlnInstance, config.membershipContentTopic, uint64(config.userMessageLimit)
+  )
 
   # Create nullifier log
   let nullifierLog = newNullifierLog()
@@ -144,15 +146,19 @@ proc init*(sp: MixRlnSpamProtection): Future[RlnResult[void]] {.async.} =
 
   # Load or generate credentials
   if sp.config.keystorePassword.len > 0:
-    let (cred, maybeIndex, wasGenerated) = loadOrGenerateCredentials(
+    let (cred, maybeIndex, maybeRateLimit, wasGenerated) = loadOrGenerateCredentials(
       sp.config.keystorePath, sp.config.keystorePassword
     ).valueOr:
       return err("Failed to load/generate credentials: " & error)
 
     sp.groupManager.credentials = some(cred)
     sp.groupManager.membershipIndex = maybeIndex
-    # Note: We don't restore to tree here if we have an index, because loadTree() 
-    # might be called next which would clear membership tables. 
+    # If keystore has a stored rate limit, use it (overrides node's config)
+    if maybeRateLimit.isSome:
+      sp.groupManager.userMessageLimit = maybeRateLimit.get()
+      info "Using rate limit from keystore", userMessageLimit = maybeRateLimit.get()
+    # Note: We don't restore to tree here if we have an index, because loadTree()
+    # might be called next which would clear membership tables.
     # The restoration happens in restoreCredentialsToTree() after tree operations.
 
     if wasGenerated:
@@ -161,7 +167,8 @@ proc init*(sp: MixRlnSpamProtection): Future[RlnResult[void]] {.async.} =
     else:
       info "Loaded existing credentials",
         commitment = cred.idCommitment[0 .. 7].toHex() & "...",
-        hasIndex = maybeIndex.isSome
+        hasIndex = maybeIndex.isSome,
+        hasRateLimit = maybeRateLimit.isSome
   else:
     # Generate credentials without saving
     let cred = generateCredentials().valueOr:
@@ -271,12 +278,8 @@ method generateProof*(
     sp.messageIdCounter = 0
     sp.lastEpoch = epoch
 
-  # Check if we've exceeded message limit
-  when not defined(disableClientRateLimit):
-    if sp.messageIdCounter >= uint(sp.config.userMessageLimit):
-      error "Message limit exceeded",
-        counter = sp.messageIdCounter, limit = sp.config.userMessageLimit
-      return err("Message limit exceeded for current epoch")
+  # Note: Rate limit enforcement happens in zerokit's generate_rln_proof_with_witness FFI call,
+  # which validates messageId < userMessageLimit internally. No need to check here.
 
   trace "Calling groupManager.generateProof",
     bindingDataLen = bindingData.len,
@@ -333,14 +336,14 @@ proc handleSpamDetected(
   var idCommitment: IDCommitment
   copyMem(addr idCommitment[0], unsafeAddr spammerCommitment[0], HashByteSize)
 
-  # Find the member index by commitment
-  let memberIndex = sp.groupManager.getMemberIndex(idCommitment)
+  # Look up the spammer by their idCommitment (tracked for spam recovery)
+  let memberIndex = sp.groupManager.getMemberIndexByIdCommitment(idCommitment)
 
   if memberIndex.isSome:
     let index = memberIndex.get()
 
     info "Removing spammer from membership",
-      index = index, commitment = idCommitment[0 .. 7].toHex() & "..."
+      index = index, idCommitment = idCommitment[0 .. 7].toHex() & "..."
 
     # Remove from local tree and broadcast deletion
     # The withdraw method handles both local removal and broadcast
@@ -513,8 +516,8 @@ proc restoreCredentialsToTree*(sp: MixRlnSpamProtection): RlnResult[void] =
     let cred = sp.groupManager.credentials.get()
     let index = sp.groupManager.membershipIndex.get()
 
-    # Check if our member is already in the tree
-    if not sp.groupManager.hasMember(cred.idCommitment):
+    # Check if our member is already in the tree (tracked by idCommitment)
+    if not sp.groupManager.hasMemberByIdCommitment(cred.idCommitment):
       let restoreRes =
         sp.groupManager.restoreMemberFromKeystore(cred.idCommitment, index)
       if restoreRes.isErr:

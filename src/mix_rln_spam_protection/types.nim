@@ -89,9 +89,12 @@ type
     Remove
 
   # Membership update message (for coordination layer)
+  # Similar to waku-rln-relay's approach: send idCommitment + userMessageLimit
+  # so receivers can both compute the tree leaf AND track idCommitment for spam recovery
   MembershipUpdate* = object ## Message broadcast on membership content topic.
     action*: MembershipAction
-    idCommitment*: IDCommitment
+    idCommitment*: IDCommitment ## Identity commitment (for spam recovery)
+    userMessageLimit*: uint64 ## Rate limit for this member
     index*: MembershipIndex
 
   # Proof metadata broadcast message (for coordination layer)

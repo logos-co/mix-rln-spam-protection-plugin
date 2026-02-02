@@ -35,6 +35,7 @@ type
     iv: seq[byte]
     ciphertext: seq[byte] # Encrypted IdentityCredential
     membershipIndex: Option[MembershipIndex]
+    userMessageLimit: Option[uint64] # Per-user rate limit (0 means use node default)
 
   # Keystore containing multiple credentials
   Keystore* = object
@@ -117,6 +118,7 @@ proc encryptCredential(
       iv: iv,
       ciphertext: ciphertext,
       membershipIndex: none(MembershipIndex),
+      userMessageLimit: none(uint64),
     )
   )
 
@@ -170,6 +172,9 @@ proc entryToJson(entry: KeystoreEntry): JsonNode =
   if entry.membershipIndex.isSome:
     node["membershipIndex"] = %entry.membershipIndex.get()
 
+  if entry.userMessageLimit.isSome:
+    node["userMessageLimit"] = %entry.userMessageLimit.get()
+
   node
 
 proc entryFromJson(node: JsonNode): RlnResult[KeystoreEntry] =
@@ -192,11 +197,16 @@ proc entryFromJson(node: JsonNode): RlnResult[KeystoreEntry] =
     iv: iv,
     ciphertext: ciphertext,
     membershipIndex: none(MembershipIndex),
+    userMessageLimit: none(uint64),
   )
 
   if node.hasKey("membershipIndex"):
     entry.membershipIndex =
       some(MembershipIndex(node["membershipIndex"].getBiggestInt()))
+
+  if node.hasKey("userMessageLimit"):
+    entry.userMessageLimit =
+      some(uint64(node["userMessageLimit"].getBiggestInt()))
 
   ok(entry)
 
@@ -205,12 +215,14 @@ proc saveKeystore*(
     password: string,
     path: string,
     membershipIndex: Option[MembershipIndex] = none(MembershipIndex),
+    userMessageLimit: Option[uint64] = none(uint64),
 ): RlnResult[void] =
   ## Save a credential to a keystore file.
   var entry = encryptCredential(cred, password).valueOr:
     return err("Failed to encrypt credential: " & error)
 
   entry.membershipIndex = membershipIndex
+  entry.userMessageLimit = userMessageLimit
 
   var entriesJson = newJArray()
   entriesJson.add(entryToJson(entry))
@@ -226,8 +238,9 @@ proc saveKeystore*(
 
 proc loadKeystore*(
     path: string, password: string
-): RlnResult[(IdentityCredential, Option[MembershipIndex])] =
+): RlnResult[(IdentityCredential, Option[MembershipIndex], Option[uint64])] =
   ## Load a credential from a keystore file.
+  ## Returns (credential, membershipIndex, userMessageLimit).
   if not fileExists(path):
     return err("Keystore file not found: " & path)
 
@@ -257,20 +270,21 @@ proc loadKeystore*(
   let cred = decryptCredential(entry, password).valueOr:
     return err("Failed to decrypt credential: " & error)
 
-  debug "Loaded keystore", path = path, hasIndex = entry.membershipIndex.isSome
-  ok((cred, entry.membershipIndex))
+  debug "Loaded keystore", path = path, hasIndex = entry.membershipIndex.isSome,
+    hasRateLimit = entry.userMessageLimit.isSome
+  ok((cred, entry.membershipIndex, entry.userMessageLimit))
 
 proc loadOrGenerateCredentials*(
     keystorePath: string, password: string
-): RlnResult[(IdentityCredential, Option[MembershipIndex], bool)] =
+): RlnResult[(IdentityCredential, Option[MembershipIndex], Option[uint64], bool)] =
   ## Load credentials from keystore if it exists, otherwise generate new ones.
-  ## Returns (credential, membershipIndex, wasGenerated).
+  ## Returns (credential, membershipIndex, userMessageLimit, wasGenerated).
 
   if fileExists(keystorePath):
-    let (cred, index) = loadKeystore(keystorePath, password).valueOr:
+    let (cred, index, rateLimit) = loadKeystore(keystorePath, password).valueOr:
       return err("Failed to load keystore: " & error)
     debug "Loaded existing credentials"
-    ok((cred, index, false))
+    ok((cred, index, rateLimit, false))
   else:
     let cred = generateCredentials().valueOr:
       return err("Failed to generate credentials: " & error)
@@ -281,4 +295,4 @@ proc loadOrGenerateCredentials*(
       warn "Failed to save generated credentials", error = saveResult.error
 
     debug "Generated new credentials"
-    ok((cred, none(MembershipIndex), true))
+    ok((cred, none(MembershipIndex), none(uint64), true))
