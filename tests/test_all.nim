@@ -27,6 +27,19 @@ import ../src/mix_rln_spam_protection/rln_interface
 # Use std/unittest (testutils/unittests available in logos-messaging-nim context)
 import std/unittest
 
+# =============================================================================
+# TEST CONSTANTS
+# =============================================================================
+
+const
+  # Rate limiting - used across multiple spam detection tests
+  TestUserMessageLimit* = 100'u64
+    ## User message limit used in tests (messages per epoch)
+
+  # Membership index - used across multiple tests
+  TestMemberIndex* = 0'u64
+    ## Default membership index for single-member tests
+
 # Test helpers
 
 proc valid(x: openArray[byte]): bool =
@@ -358,10 +371,10 @@ suite "Spam Detection and Secret Recovery":
     let spammerCreds = credResult.get()
 
     # Register spammer in the tree with rate commitment
-    let rateCommitment = computeRateCommitment(spammerCreds.idCommitment, 100)
+    let rateCommitment = computeRateCommitment(spammerCreds.idCommitment, TestUserMessageLimit)
     check rateCommitment.isOk
 
-    let insertResult = rln.insertMemberAt(0, rateCommitment.get())
+    let insertResult = rln.insertMemberAt(TestMemberIndex, rateCommitment.get())
     check insertResult.isOk
 
     # Flush tree to ensure it's synced
@@ -377,13 +390,13 @@ suite "Spam Detection and Secret Recovery":
     let signal2 = @[byte(5), 6, 7, 8]  # Second message (spam)
 
     let proof1Result = rln.generateRlnProofWithWitness(
-      spammerCreds, 0, epoch, rlnId, signal1, messageId = 0, userMessageLimit = 100
+      spammerCreds, TestMemberIndex, epoch, rlnId, signal1, messageId = 0, userMessageLimit = TestUserMessageLimit
     )
     check proof1Result.isOk
     let proof1 = proof1Result.get()
 
     let proof2Result = rln.generateRlnProofWithWitness(
-      spammerCreds, 0, epoch, rlnId, signal2, messageId = 0, userMessageLimit = 100
+      spammerCreds, TestMemberIndex, epoch, rlnId, signal2, messageId = 0, userMessageLimit = TestUserMessageLimit
     )
     check proof2Result.isOk
     let proof2 = proof2Result.get()
@@ -452,9 +465,9 @@ suite "Spam Detection and Secret Recovery":
     let creds = credResult.get()
 
     # Register member
-    let rateCommitment = computeRateCommitment(creds.idCommitment, 100)
+    let rateCommitment = computeRateCommitment(creds.idCommitment, TestUserMessageLimit)
     check rateCommitment.isOk
-    let insertResult = rln.insertMemberAt(0, rateCommitment.get())
+    let insertResult = rln.insertMemberAt(TestMemberIndex, rateCommitment.get())
     check insertResult.isOk
 
     # Flush tree
@@ -469,13 +482,13 @@ suite "Spam Detection and Secret Recovery":
     let signal2 = @[byte(5), 6, 7, 8]
 
     let proof1Result = rln.generateRlnProofWithWitness(
-      creds, 0, epoch, rlnId, signal1, messageId = 0, userMessageLimit = 100
+      creds, TestMemberIndex, epoch, rlnId, signal1, messageId = 0, userMessageLimit = TestUserMessageLimit
     )
     check proof1Result.isOk
     let proof1 = proof1Result.get()
 
     let proof2Result = rln.generateRlnProofWithWitness(
-      creds, 0, epoch, rlnId, signal2, messageId = 1, userMessageLimit = 100
+      creds, TestMemberIndex, epoch, rlnId, signal2, messageId = 1, userMessageLimit = TestUserMessageLimit
     )
     check proof2Result.isOk
     let proof2 = proof2Result.get()
@@ -524,9 +537,9 @@ suite "Spam Detection and Secret Recovery":
     let creds = credResult.get()
 
     # Register member
-    let rateCommitment = computeRateCommitment(creds.idCommitment, 100)
+    let rateCommitment = computeRateCommitment(creds.idCommitment, TestUserMessageLimit)
     check rateCommitment.isOk
-    let insertResult = rln.insertMemberAt(0, rateCommitment.get())
+    let insertResult = rln.insertMemberAt(TestMemberIndex, rateCommitment.get())
     check insertResult.isOk
 
     # Flush tree
@@ -538,7 +551,7 @@ suite "Spam Detection and Secret Recovery":
 
     # Generate proof
     let proofResult = rln.generateRlnProofWithWitness(
-      creds, 0, epoch, rlnId, signal, messageId = 0, userMessageLimit = 100
+      creds, TestMemberIndex, epoch, rlnId, signal, messageId = 0, userMessageLimit = TestUserMessageLimit
     )
     check proofResult.isOk
     let proof = proofResult.get()
@@ -561,7 +574,7 @@ suite "Spam Detection and Secret Recovery":
 
     # Create config
     var config = defaultConfig()
-    config.userMessageLimit = 100
+    config.userMessageLimit = int(TestUserMessageLimit)
 
     # Create spam protection instance
     let spResult = newMixRlnSpamProtection(config)
