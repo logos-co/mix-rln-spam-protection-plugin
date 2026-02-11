@@ -314,7 +314,7 @@ proc createRLNInstance*(resourcesPath: string = ""): RlnResult[RLNInstance] =
     emit:
       """
   extern NIM_BOOL new(unsigned int tree_depth, void* input_buffer, void** ctx);
-  `success` = new(`treeDepth`, &`configBuffer`, &`ctx`);
+  `success` = new(`treeDepth`, &`configBuffer`, (void**)&`ctx`);
   """
   .}
 
