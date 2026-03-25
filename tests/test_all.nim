@@ -594,7 +594,7 @@ suite "Spam Detection and Secret Recovery":
     # Register self
     let registerResult = waitFor sp.registerSelf()
     check registerResult.isOk
-    let memberIndex = registerResult.get()
+    discard registerResult.get()
 
     # Start the plugin
     let startResult = waitFor sp.start()

@@ -61,6 +61,7 @@ type
     isInitialized*: bool
     isSynced*: bool
     userMessageLimit*: uint64 ## Max messages per epoch for this group
+    partialProofCache*: Option[PartialProofCache]
 
   # Offchain group manager using content-topic propagation
   OffchainGroupManager* = ref object of GroupManager
@@ -127,6 +128,28 @@ proc updateRootTrackerOrLog(gm: OffchainGroupManager) =
   let result = gm.rootTracker.updateFromInstance(gm.rlnInstance)
   if result.isErr:
     warn "Failed to update root tracker", error = result.error
+
+proc refreshProofCache*(gm: OffchainGroupManager): RlnResult[void] =
+  ## Rebuild the cached partial proof for the local member, if available.
+  if gm.credentials.isNone or gm.membershipIndex.isNone:
+    gm.partialProofCache = none(PartialProofCache)
+    return ok()
+
+  let cache = gm.rlnInstance.generatePartialProofCache(
+    gm.credentials.get(),
+    gm.membershipIndex.get(),
+    gm.userMessageLimit,
+  ).valueOr:
+    gm.partialProofCache = none(PartialProofCache)
+    return err("Failed to refresh partial proof cache: " & error)
+
+  gm.partialProofCache = some(cache)
+  ok()
+
+proc refreshProofCacheOrLog(gm: OffchainGroupManager) =
+  let result = gm.refreshProofCache()
+  if result.isErr:
+    warn "Failed to refresh partial proof cache", error = result.error
 
 # GroupManager base implementation (abstract methods)
 
@@ -226,12 +249,47 @@ method generateProof*(
     messageId = messageId,
     membershipIndex = index
 
-  # Use witness-based proof generation for reliable Merkle proof handling
-  # This explicitly fetches the Merkle proof and passes it to zerokit,
-  # bypassing the internal cache that may be stale
-  let proofResult = gm.rlnInstance.generateRlnProofWithWitness(
-    creds, index, epoch, rlnIdentifier, signal, messageId, gm.userMessageLimit
-  )
+  # Happy path: cached partial-proof should be available and valid most of the time.
+  # On cache miss/staleness, rebuild once and retry. Fall back to full proof generation.
+  var proofResult: RlnResult[RateLimitProof] = err("partial-proof cache not used")
+  var usedPartialCache = false
+
+  if gm.partialProofCache.isSome:
+    proofResult = gm.rlnInstance.finishRlnProofWithCache(
+      gm.partialProofCache.get(),
+      creds,
+      index,
+      epoch,
+      rlnIdentifier,
+      signal,
+      messageId,
+      gm.userMessageLimit,
+    )
+    usedPartialCache = proofResult.isOk
+    if proofResult.isErr:
+      warn "Cached partial proof could not be used", error = proofResult.error
+
+  if not usedPartialCache and gm of OffchainGroupManager:
+    OffchainGroupManager(gm).refreshProofCacheOrLog()
+    if gm.partialProofCache.isSome:
+      proofResult = gm.rlnInstance.finishRlnProofWithCache(
+        gm.partialProofCache.get(),
+        creds,
+        index,
+        epoch,
+        rlnIdentifier,
+        signal,
+        messageId,
+        gm.userMessageLimit,
+      )
+      usedPartialCache = proofResult.isOk
+      if proofResult.isErr:
+        warn "Refreshed partial proof cache could not be used", error = proofResult.error
+
+  if not usedPartialCache:
+    proofResult = gm.rlnInstance.generateRlnProofWithWitness(
+      creds, index, epoch, rlnIdentifier, signal, messageId, gm.userMessageLimit
+    )
 
   if proofResult.isErr:
     error "RLN proof generation failed", error = proofResult.error
@@ -291,6 +349,7 @@ proc newOffchainGroupManager*(
     isInitialized: false,
     isSynced: false,
     userMessageLimit: userMessageLimit,
+    partialProofCache: none(PartialProofCache),
     publishCallback: none(PublishCallback),
     membershipByIdCommitment: initTable[IDCommitment, MembershipIndex](),
     membershipByIndex: initTable[MembershipIndex, IDCommitment](),
@@ -370,6 +429,8 @@ proc restoreMemberFromKeystore*(
   if index >= gm.nextIndex:
     gm.nextIndex = index + 1
 
+  gm.refreshProofCacheOrLog()
+
   info "Restored member from keystore", index = index, userMessageLimit = memberLimit
   ok()
 
@@ -414,6 +475,7 @@ method register*(
 
   # Update root tracker
   gm.updateRootTrackerOrLog()
+  gm.refreshProofCacheOrLog()
 
   # Broadcast membership update with idCommitment + userMessageLimit (like waku-rln-relay)
   if gm.publishCallback.isSome:
@@ -465,6 +527,7 @@ proc registerWithLimit*(
 
   # Update root tracker
   gm.updateRootTrackerOrLog()
+  gm.refreshProofCacheOrLog()
 
   # Broadcast membership update with the specific rate limit
   if gm.publishCallback.isSome:
@@ -501,6 +564,7 @@ method register*(
   let index = indexResult.get()
   gm.credentials = some(credentials)
   gm.membershipIndex = some(index)
+  gm.refreshProofCacheOrLog()
 
   debug "Self registered", index = index
   ok(index)
@@ -534,6 +598,7 @@ method withdraw*(
 
   # Update root tracker
   gm.updateRootTrackerOrLog()
+  gm.refreshProofCacheOrLog()
 
   # Broadcast membership update
   if gm.publishCallback.isSome:
@@ -554,6 +619,7 @@ method withdraw*(
   if gm.membershipIndex.isSome and gm.membershipIndex.get() == index:
     gm.credentials = none(IdentityCredential)
     gm.membershipIndex = none(MembershipIndex)
+    gm.partialProofCache = none(PartialProofCache)
     warn "Self membership withdrawn"
 
   debug "Member withdrawn", index = index
@@ -598,6 +664,7 @@ proc handleMembershipUpdate*(
 
     # Update root tracker
     gm.updateRootTrackerOrLog()
+    gm.refreshProofCacheOrLog()
 
     # Call callback
     if gm.onRegister.isSome:
@@ -623,6 +690,7 @@ proc handleMembershipUpdate*(
 
     # Update root tracker
     gm.updateRootTrackerOrLog()
+    gm.refreshProofCacheOrLog()
 
     # Call callback
     if gm.onWithdraw.isSome:
@@ -632,6 +700,7 @@ proc handleMembershipUpdate*(
     if gm.membershipIndex.isSome and gm.membershipIndex.get() == update.index:
       gm.credentials = none(IdentityCredential)
       gm.membershipIndex = none(MembershipIndex)
+      gm.partialProofCache = none(PartialProofCache)
       warn "Self membership removed by network"
 
     debug "Member removed from network update", index = update.index
@@ -799,6 +868,7 @@ proc loadTreeSnapshot*(gm: OffchainGroupManager, data: seq[byte]): RlnResult[voi
 
   # Update Merkle root tracker with new tree state
   gm.updateRootTrackerOrLog()
+  gm.refreshProofCacheOrLog()
 
   debug "Tree snapshot loaded successfully", memberCount = memberCount, nextIndex = nextIndex
   ok()

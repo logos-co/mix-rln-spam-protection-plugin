@@ -287,7 +287,7 @@ method generateProof*(
 
   # Generate proof
   let proof = sp.groupManager.generateProof(
-    seq[byte](bindingData), epoch, sp.config.rlnIdentifier, sp.messageIdCounter
+    bindingData, epoch, sp.config.rlnIdentifier, sp.messageIdCounter
   ).valueOr:
     error "GroupManager proof generation failed", error = error
     return err("Failed to generate proof: " & error)
@@ -330,7 +330,10 @@ proc handleSpamDetected(
   # Compute the spammer's identity commitment from their secret
   # idCommitment = Poseidon(idSecretHash)
   let spammerCommitment = poseidonHash(@[@secret]).valueOr:
-    error "Failed to compute spammer commitment from secret", err = error
+    warn "Recovered spammer secret but could not map it back to a member commitment",
+      err = error
+    if sp.spamHandler.isSome:
+      await sp.spamHandler.get()(proof, secret, 0)
     return
 
   var idCommitment: IDCommitment
@@ -403,7 +406,7 @@ method verifyProof*(
 
   # Verify the zkSNARK proof
   let isValid = sp.groupManager.verifyProof(
-    proof, seq[byte](bindingData), sp.config.rlnIdentifier
+    proof, bindingData, sp.config.rlnIdentifier
   ).valueOr:
     return err("Proof verification error: " & error)
 
@@ -500,13 +503,13 @@ proc saveTree*(sp: MixRlnSpamProtection): RlnResult[void] =
 
 proc loadTree*(sp: MixRlnSpamProtection): RlnResult[void] =
   ## Load tree state from file.
-  let result = sp.groupManager.loadTreeFromFile(sp.config.treePath)
-  if result.isOk:
+  let loadResult = sp.groupManager.loadTreeFromFile(sp.config.treePath)
+  if loadResult.isOk:
     let memberCount = sp.groupManager.getMemberCount()
     debug "Tree loaded from file",
       treePath = sp.config.treePath,
       memberCount = memberCount
-  result
+  loadResult
 
 proc restoreCredentialsToTree*(sp: MixRlnSpamProtection): RlnResult[void] =
   ## Restore our credentials to the tree if we have an index.
