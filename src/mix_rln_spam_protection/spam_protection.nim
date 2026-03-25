@@ -271,7 +271,7 @@ method generateProof*(
     warn "Spam protection not ready for proof generation"
     return err("Plugin not ready")
 
-  let epoch = currentEpoch()
+  let epoch = currentEpoch(sp.config.epochDurationSeconds)
 
   # Reset message counter if epoch changed
   if epoch != sp.lastEpoch:
@@ -386,10 +386,10 @@ method verifyProof*(
   let proof = RateLimitProof.decode(encodedProofData).valueOr:
     return err("Failed to decode proof: " & $error)
 
-  let curEpoch = currentEpoch()
+  let curEpoch = currentEpoch(sp.config.epochDurationSeconds)
 
   # Check epoch validity
-  if not isEpochValid(proof.epoch, curEpoch):
+  if not isEpochValid(proof.epoch, curEpoch, sp.config.maxEpochGap):
     debug "Proof rejected: epoch out of range",
       proofEpoch = epochToUint64(proof.epoch),
       currentEpoch = epochToUint64(curEpoch),

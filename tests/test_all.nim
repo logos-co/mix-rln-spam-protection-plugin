@@ -64,8 +64,14 @@ suite "Constants":
     let epoch = calcEpoch(timestamp)
     let epochNum = epochToUint64(epoch)
 
-    # With 10 second epochs: 1700000000 / 10 = 170000000
-    check epochNum == uint64(timestamp / EpochDurationSeconds)
+    # With RFC ceil semantics, integer-aligned timestamps keep the same epoch number.
+    check epochNum == 170000000'u64
+
+  test "Epoch calculation uses RFC ceil semantics":
+    let timestamp = 10.1
+
+    let epoch = calcEpoch(timestamp)
+    check epochToUint64(epoch) == 2'u64
 
   test "Epoch validity check":
     let current = currentEpoch()

@@ -4,7 +4,7 @@
 
 ## Core type definitions for the RLN spam protection plugin.
 
-import std/times
+import std/[math, times]
 import chronos
 import results
 import ./constants
@@ -149,23 +149,34 @@ type
 # Epochs are 32-byte arrays with the epoch number stored in the first 8 bytes
 # as little-endian uint64. The remaining 24 bytes are zero-padded.
 
-proc calcEpoch*(timestamp: float64): Epoch =
+proc calcEpoch*(
+    timestamp: float64,
+    epochDurationSeconds: float64 = EpochDurationSeconds,
+): Epoch =
   ## Calculate the epoch for a given Unix timestamp.
-  ## Epoch number = floor(timestamp / EpochDurationSeconds)
-  let epochNum = uint64(timestamp / EpochDurationSeconds)
+  let epochNum =
+    if epochDurationSeconds <= 0 or timestamp <= 0:
+      0'u64
+    else:
+      uint64(ceil(timestamp / epochDurationSeconds))
   result = default(Epoch)
   # Store epoch number in first 8 bytes as little-endian
   let epochBytes = epochNum.toBytesLE()
   for i in 0 ..< Uint64ByteSize:
     result[i] = epochBytes[i]
 
-proc calcEpoch*(t: Time): Epoch =
+proc calcEpoch*(
+    t: Time,
+    epochDurationSeconds: float64 = EpochDurationSeconds,
+): Epoch =
   ## Calculate the epoch for a given Time.
-  calcEpoch(t.toUnixFloat())
+  calcEpoch(t.toUnixFloat(), epochDurationSeconds)
 
-proc currentEpoch*(): Epoch =
+proc currentEpoch*(
+    epochDurationSeconds: float64 = EpochDurationSeconds,
+): Epoch =
   ## Get the current epoch based on system time.
-  calcEpoch(getTime())
+  calcEpoch(getTime(), epochDurationSeconds)
 
 proc epochToUint64*(epoch: Epoch): uint64 =
   ## Convert an epoch to its numeric value (reads first 8 bytes as little-endian).
@@ -175,10 +186,12 @@ proc epochDiff*(e1, e2: Epoch): int64 =
   ## Calculate the difference between two epochs.
   int64(epochToUint64(e1)) - int64(epochToUint64(e2))
 
-proc isEpochValid*(msgEpoch: Epoch, currentEpoch: Epoch): bool =
+proc isEpochValid*(
+    msgEpoch: Epoch, currentEpoch: Epoch, maxEpochGap: int = MaxEpochGap
+): bool =
   ## Check if a message epoch is within the acceptable gap.
   let diff = abs(epochDiff(currentEpoch, msgEpoch))
-  diff <= MaxEpochGap
+  diff <= maxEpochGap
 
 # =============================================================================
 # Hex Conversion Utilities
