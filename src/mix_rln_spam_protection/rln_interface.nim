@@ -87,6 +87,8 @@ type
     ## Cached partial proof tied to a specific Merkle root.
     root*: MerkleNode
     partialProofBytes*: seq[byte]
+    pathElements*: seq[byte]
+    pathIndex*: seq[byte]
 
   RLN* = FFI_RLN
 
@@ -236,6 +238,28 @@ proc vecToSeq(data: Vec_uint8): seq[byte] =
   result = newSeq[byte](int(data.len))
   if result.len > 0:
     copyMem(addr result[0], data.dataPtr, result.len)
+
+proc merkleProofPathElementsToSeq(merkleProof: ptr FFI_MerkleProof): RlnResult[seq[byte]] =
+  let depth = int(merkleProof[].path_index.len)
+  var pathElements = newSeq[byte](depth * FieldElementSize)
+  if depth == 0:
+    return ok(pathElements)
+
+  for i in 0 ..< depth:
+    let element = ffi_vec_cfr_get(addr merkleProof[].path_elements, CSize(i))
+    if element.isNil:
+      return err("Missing Merkle path element at index " & $i)
+
+    let bytes = ffi_cfr_to_bytes_le(element)
+    defer:
+      ffi_vec_u8_free(bytes)
+
+    if int(bytes.len) != FieldElementSize:
+      return err("Invalid Merkle path element size")
+
+    copyMem(addr pathElements[i * FieldElementSize], bytes.dataPtr, FieldElementSize)
+
+  ok(pathElements)
 
 proc stringToBytes(s: string): seq[byte] =
   result = newSeq[byte](s.len)
@@ -460,6 +484,78 @@ proc buildWitness(
 
   if witnessRes.ok.isNil:
     return err(consumeError("Failed to create witness: ", witnessRes.err))
+
+  ok(witnessRes.ok)
+
+proc buildWitness(
+    pathElements: openArray[byte],
+    pathIndex: openArray[byte],
+    credential: IdentityCredential,
+    epoch: Epoch,
+    rlnIdentifier: RlnIdentifier,
+    signal: openArray[byte],
+    messageId: uint,
+    userMessageLimit: uint64,
+): RlnResult[ptr FFI_RLNWitnessInput] {.gcsafe.} =
+  if pathElements.len != pathIndex.len * FieldElementSize:
+    return err(
+      "Invalid cached Merkle path: expected " &
+        $(pathIndex.len * FieldElementSize) & " bytes, got " & $pathElements.len
+    )
+
+  var pathElementsVec = ffi_vec_cfr_new(CSize(pathIndex.len))
+  defer:
+    ffi_vec_cfr_free(pathElementsVec)
+
+  for i in 0 ..< pathIndex.len:
+    let start = i * FieldElementSize
+    let element = bytesToCfrLe(pathElements.toOpenArray(start, start + FieldElementSize - 1)).valueOr:
+      return err(error)
+    ffi_vec_cfr_push(addr pathElementsVec, element)
+    ffi_cfr_free(element)
+
+  var pathIndexVec = toVecUint8(pathIndex)
+
+  let identitySecret = bytesToCfrLe(credential.idSecretHash).valueOr:
+    return err(error)
+  defer:
+    ffi_cfr_free(identitySecret)
+
+  let userLimit = bytesToCfrLe(uint64ToField(userMessageLimit)).valueOr:
+    return err(error)
+  defer:
+    ffi_cfr_free(userLimit)
+
+  let messageIdFr = bytesToCfrLe(uint64ToField(uint64(messageId))).valueOr:
+    return err(error)
+  defer:
+    ffi_cfr_free(messageIdFr)
+
+  let x = hashToFieldLe(signal).valueOr:
+    return err(error)
+  defer:
+    ffi_cfr_free(x)
+
+  let externalNullifierBytes = computeExternalNullifier(epoch, rlnIdentifier).valueOr:
+    return err("Failed to compute external nullifier: " & error)
+
+  let externalNullifier = bytesToCfrLe(externalNullifierBytes).valueOr:
+    return err(error)
+  defer:
+    ffi_cfr_free(externalNullifier)
+
+  let witnessRes = ffi_rln_witness_input_new(
+    identitySecret,
+    userLimit,
+    messageIdFr,
+    addr pathElementsVec,
+    addr pathIndexVec,
+    x,
+    externalNullifier,
+  )
+
+  if witnessRes.ok.isNil:
+    return err(consumeError("Failed to create witness from cached Merkle path: ", witnessRes.err))
 
   ok(witnessRes.ok)
 
@@ -691,6 +787,10 @@ proc generatePartialProofCache*(
   defer:
     ffi_merkle_proof_free(merkleProof)
 
+  let pathElements = merkleProofPathElementsToSeq(merkleProof).valueOr:
+    return err(error)
+  let pathIndex = vecToSeq(merkleProof[].path_index)
+
   let currentRoot = instance.getMerkleRoot().valueOr:
     return err("Failed to get current root for partial proof cache: " & error)
 
@@ -728,7 +828,14 @@ proc generatePartialProofCache*(
   defer:
     ffi_vec_u8_free(bytesRes.ok)
 
-  ok(PartialProofCache(root: currentRoot, partialProofBytes: vecToSeq(bytesRes.ok)))
+  ok(
+    PartialProofCache(
+      root: currentRoot,
+      partialProofBytes: vecToSeq(bytesRes.ok),
+      pathElements: pathElements,
+      pathIndex: pathIndex,
+    )
+  )
 
 proc generateRlnProofWithWitness*(
     instance: RLNInstance,
@@ -781,19 +888,16 @@ proc finishRlnProofWithCache*(
     messageId: uint = 0,
     userMessageLimit: uint64 = UserMessageLimit,
 ): RlnResult[RateLimitProof] {.gcsafe.} =
+  discard memberIndex
   let currentRoot = instance.getMerkleRoot().valueOr:
     return err("Failed to get current root: " & error)
 
   if currentRoot != cache.root:
     return err("Cached partial proof is stale for the current Merkle root")
 
-  let merkleProof = instance.getMerkleProofRaw(memberIndex).valueOr:
-    return err(error)
-  defer:
-    ffi_merkle_proof_free(merkleProof)
-
   let witness = buildWitness(
-    merkleProof,
+    cache.pathElements,
+    cache.pathIndex,
     credential,
     epoch,
     rlnIdentifier,

@@ -104,6 +104,16 @@ proc addRoot*(tracker: MerkleRootTracker, root: MerkleNode) =
   tracker.validRoots.addLast(root)
   tracker.rootSet.incl(root)
 
+proc resetRoots*(tracker: MerkleRootTracker) =
+  ## Drop all tracked roots.
+  tracker.validRoots = initDeque[MerkleNode]()
+  tracker.rootSet = initHashSet[MerkleNode]()
+
+proc resetToRoot*(tracker: MerkleRootTracker, root: MerkleNode) =
+  ## Replace the valid root window with a single root.
+  tracker.resetRoots()
+  tracker.addRoot(root)
+
 proc containsRoot*(tracker: MerkleRootTracker, root: MerkleNode): bool =
   ## Check if a root is in the valid window. O(1) lookup.
   root in tracker.rootSet
@@ -123,11 +133,26 @@ proc updateFromInstance*(
   tracker.addRoot(root)
   ok()
 
+proc resetToInstance*(
+    tracker: MerkleRootTracker, instance: RLNInstance
+): RlnResult[void] =
+  ## Reset the tracker to only the current root from the RLN instance.
+  let root = instance.getMerkleRoot().valueOr:
+    return err("Failed to get Merkle root: " & error)
+  tracker.resetToRoot(root)
+  ok()
+
 proc updateRootTrackerOrLog(gm: OffchainGroupManager) =
   ## Update root tracker, logging any errors (non-fatal).
   let result = gm.rootTracker.updateFromInstance(gm.rlnInstance)
   if result.isErr:
     warn "Failed to update root tracker", error = result.error
+
+proc resetRootTrackerOrLog(gm: OffchainGroupManager) =
+  ## Reset root tracker to the current tree root, logging any errors (non-fatal).
+  let result = gm.rootTracker.resetToInstance(gm.rlnInstance)
+  if result.isErr:
+    warn "Failed to reset root tracker", error = result.error
 
 proc refreshProofCache*(gm: OffchainGroupManager): RlnResult[void] =
   ## Rebuild the cached partial proof for the local member, if available.
@@ -429,6 +454,7 @@ proc restoreMemberFromKeystore*(
   if index >= gm.nextIndex:
     gm.nextIndex = index + 1
 
+  gm.updateRootTrackerOrLog()
   gm.refreshProofCacheOrLog()
 
   info "Restored member from keystore", index = index, userMessageLimit = memberLimit
@@ -596,8 +622,8 @@ method withdraw*(
   gm.membershipByIndex.del(index)
   gm.rateLimitByIdCommitment.del(idCommitment)
 
-  # Update root tracker
-  gm.updateRootTrackerOrLog()
+  # Removals invalidate previously accepted roots.
+  gm.resetRootTrackerOrLog()
   gm.refreshProofCacheOrLog()
 
   # Broadcast membership update
@@ -662,7 +688,7 @@ proc handleMembershipUpdate*(
     if update.index >= gm.nextIndex:
       gm.nextIndex = update.index + 1
 
-    # Update root tracker
+    # Additions can keep the valid root window.
     gm.updateRootTrackerOrLog()
     gm.refreshProofCacheOrLog()
 
@@ -688,8 +714,8 @@ proc handleMembershipUpdate*(
     gm.membershipByIndex.del(update.index)
     gm.rateLimitByIdCommitment.del(idCommitment)
 
-    # Update root tracker
-    gm.updateRootTrackerOrLog()
+    # Removals invalidate previously accepted roots.
+    gm.resetRootTrackerOrLog()
     gm.refreshProofCacheOrLog()
 
     # Call callback
@@ -831,6 +857,7 @@ proc loadTreeSnapshot*(gm: OffchainGroupManager, data: seq[byte]): RlnResult[voi
   gm.membershipByIdCommitment.clear()
   gm.membershipByIndex.clear()
   gm.rateLimitByIdCommitment.clear()
+  gm.rootTracker.resetRoots()
 
   # Load each member
   for i in 0 ..< memberCount:
@@ -866,8 +893,8 @@ proc loadTreeSnapshot*(gm: OffchainGroupManager, data: seq[byte]): RlnResult[voi
 
   gm.nextIndex = MembershipIndex(nextIndex)
 
-  # Update Merkle root tracker with new tree state
-  gm.updateRootTrackerOrLog()
+  # Replace any previously accepted roots with the snapshot root.
+  gm.resetRootTrackerOrLog()
   gm.refreshProofCacheOrLog()
 
   debug "Tree snapshot loaded successfully", memberCount = memberCount, nextIndex = nextIndex
