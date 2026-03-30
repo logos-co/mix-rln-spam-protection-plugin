@@ -63,9 +63,10 @@ suite "Constants":
     let timestamp = 1700000000.0
     let epoch = calcEpoch(timestamp)
     let epochNum = epochToUint64(epoch)
+    let expectedEpochNum = uint64(timestamp / float64(EpochDurationSeconds))
 
     # With RFC ceil semantics, integer-aligned timestamps keep the same epoch number.
-    check epochNum == 170000000'u64
+    check epochNum == expectedEpochNum
 
   test "Epoch calculation uses RFC ceil semantics":
     let timestamp = 10.1
@@ -644,6 +645,7 @@ suite "Partial Proof Cache and Root Tracking":
 
     check gm.partialProofCache.isSome
     let cache = gm.partialProofCache.get()
+    check cache.memberIndex == memberIndex
     check cache.partialProofBytes.len > 0
     check cache.pathIndex.len > 0
     check cache.pathElements.len == cache.pathIndex.len * HashByteSize
@@ -663,6 +665,18 @@ suite "Partial Proof Cache and Root Tracking":
       userMessageLimit = TestUserMessageLimit,
     )
     check proofResult.isOk
+
+    let wrongIndexResult = gm.rlnInstance.finishRlnProofWithCache(
+      cache,
+      creds,
+      memberIndex + 1,
+      epoch,
+      rlnId,
+      signal,
+      messageId = 0,
+      userMessageLimit = TestUserMessageLimit,
+    )
+    check wrongIndexResult.isErr
 
     let verifyResult = gm.verifyProof(proofResult.get(), signal, rlnId)
     check verifyResult.isOk

@@ -86,6 +86,7 @@ type
   PartialProofCache* = object
     ## Cached partial proof tied to a specific Merkle root.
     root*: MerkleNode
+    memberIndex*: MembershipIndex
     partialProofBytes*: seq[byte]
     pathElements*: seq[byte]
     pathIndex*: seq[byte]
@@ -831,6 +832,7 @@ proc generatePartialProofCache*(
   ok(
     PartialProofCache(
       root: currentRoot,
+      memberIndex: memberIndex,
       partialProofBytes: vecToSeq(bytesRes.ok),
       pathElements: pathElements,
       pathIndex: pathIndex,
@@ -888,12 +890,14 @@ proc finishRlnProofWithCache*(
     messageId: uint = 0,
     userMessageLimit: uint64 = UserMessageLimit,
 ): RlnResult[RateLimitProof] {.gcsafe.} =
-  discard memberIndex
   let currentRoot = instance.getMerkleRoot().valueOr:
     return err("Failed to get current root: " & error)
 
   if currentRoot != cache.root:
     return err("Cached partial proof is stale for the current Merkle root")
+
+  if memberIndex != cache.memberIndex:
+    return err("Cached partial proof does not match the requested membership index")
 
   let witness = buildWitness(
     cache.pathElements,
