@@ -63,9 +63,16 @@ suite "Constants":
     let timestamp = 1700000000.0
     let epoch = calcEpoch(timestamp)
     let epochNum = epochToUint64(epoch)
+    let expectedEpochNum = uint64(timestamp / float64(EpochDurationSeconds))
 
-    # With 10 second epochs: 1700000000 / 10 = 170000000
-    check epochNum == uint64(timestamp / EpochDurationSeconds)
+    # With RFC ceil semantics, integer-aligned timestamps keep the same epoch number.
+    check epochNum == expectedEpochNum
+
+  test "Epoch calculation uses RFC ceil semantics":
+    let timestamp = 10.1
+
+    let epoch = calcEpoch(timestamp)
+    check epochToUint64(epoch) == 2'u64
 
   test "Epoch validity check":
     let current = currentEpoch()
@@ -588,7 +595,7 @@ suite "Spam Detection and Secret Recovery":
     # Register self
     let registerResult = waitFor sp.registerSelf()
     check registerResult.isOk
-    let memberIndex = registerResult.get()
+    discard registerResult.get()
 
     # Start the plugin
     let startResult = waitFor sp.start()
@@ -616,6 +623,132 @@ suite "Spam Detection and Secret Recovery":
     waitFor sp.stop()
 
     echo "  ✓ Full spam protection flow completed successfully"
+
+suite "Partial Proof Cache and Root Tracking":
+  test "Partial proof cache stores Merkle path and finishes valid proofs":
+    let rlnInstance = newRLNInstance()
+    check rlnInstance.isOk
+
+    let gm = newOffchainGroupManager(rlnInstance.get(), userMessageLimit = TestUserMessageLimit)
+    let initResult = waitFor gm.init()
+    check initResult.isOk
+    let startResult = waitFor gm.start()
+    check startResult.isOk
+
+    let credResult = generateCredentials()
+    check credResult.isOk
+    let creds = credResult.get()
+
+    let registerResult = waitFor gm.register(creds)
+    check registerResult.isOk
+    let memberIndex = registerResult.get()
+
+    check gm.partialProofCache.isSome
+    let cache = gm.partialProofCache.get()
+    check cache.memberIndex == memberIndex
+    check cache.partialProofBytes.len > 0
+    check cache.pathIndex.len > 0
+    check cache.pathElements.len == cache.pathIndex.len * HashByteSize
+
+    let epoch = currentEpoch()
+    let rlnId = defaultRlnIdentifier()
+    let signal = @[byte(7), 8, 9, 10]
+
+    let proofResult = gm.rlnInstance.finishRlnProofWithCache(
+      cache,
+      creds,
+      memberIndex,
+      epoch,
+      rlnId,
+      signal,
+      messageId = 0,
+      userMessageLimit = TestUserMessageLimit,
+    )
+    check proofResult.isOk
+
+    let wrongIndexResult = gm.rlnInstance.finishRlnProofWithCache(
+      cache,
+      creds,
+      memberIndex + 1,
+      epoch,
+      rlnId,
+      signal,
+      messageId = 0,
+      userMessageLimit = TestUserMessageLimit,
+    )
+    check wrongIndexResult.isErr
+
+    let verifyResult = gm.verifyProof(proofResult.get(), signal, rlnId)
+    check verifyResult.isOk
+    check verifyResult.get()
+
+  test "Removing a member resets the valid root window":
+    let rlnInstance = newRLNInstance()
+    check rlnInstance.isOk
+
+    let gm = newOffchainGroupManager(rlnInstance.get(), userMessageLimit = TestUserMessageLimit)
+    check (waitFor gm.init()).isOk
+    check (waitFor gm.start()).isOk
+
+    let selfCreds = generateCredentials()
+    check selfCreds.isOk
+    let selfRegister = waitFor gm.register(selfCreds.get())
+    check selfRegister.isOk
+
+    let rootBeforeSecondMember = gm.rlnInstance.getMerkleRoot()
+    check rootBeforeSecondMember.isOk
+
+    let peerCreds = generateCredentials()
+    check peerCreds.isOk
+    let peerRegister = waitFor gm.register(peerCreds.get().idCommitment)
+    check peerRegister.isOk
+    let peerIndex = peerRegister.get()
+
+    let rootBeforeRemoval = gm.rlnInstance.getMerkleRoot()
+    check rootBeforeRemoval.isOk
+    check gm.validateRoot(rootBeforeSecondMember.get())
+    check gm.validateRoot(rootBeforeRemoval.get())
+
+    let withdrawResult = waitFor gm.withdraw(peerIndex)
+    check withdrawResult.isOk
+
+    let currentRoot = gm.rlnInstance.getMerkleRoot()
+    check currentRoot.isOk
+    check currentRoot.get() == rootBeforeSecondMember.get()
+    check not gm.validateRoot(rootBeforeRemoval.get())
+    check gm.validateRoot(currentRoot.get())
+
+  test "Loading a snapshot replaces previously accepted roots":
+    let sourceRln = newRLNInstance()
+    check sourceRln.isOk
+    let sourceGm = newOffchainGroupManager(sourceRln.get(), userMessageLimit = TestUserMessageLimit)
+    check (waitFor sourceGm.init()).isOk
+    check (waitFor sourceGm.start()).isOk
+
+    let memberCreds = generateCredentials()
+    check memberCreds.isOk
+    let sourceRegister = waitFor sourceGm.register(memberCreds.get().idCommitment)
+    check sourceRegister.isOk
+
+    let snapshot = sourceGm.serializeTreeSnapshot()
+    let snapshotRoot = sourceGm.rlnInstance.getMerkleRoot()
+    check snapshotRoot.isOk
+
+    let targetRln = newRLNInstance()
+    check targetRln.isOk
+    let targetGm = newOffchainGroupManager(targetRln.get(), userMessageLimit = TestUserMessageLimit)
+    check (waitFor targetGm.init()).isOk
+
+    let emptyRoot = targetGm.rlnInstance.getMerkleRoot()
+    check emptyRoot.isOk
+    check targetGm.validateRoot(emptyRoot.get())
+    check snapshotRoot.get() != emptyRoot.get()
+
+    let loadResult = targetGm.loadTreeSnapshot(snapshot)
+    check loadResult.isOk
+
+    check not targetGm.validateRoot(emptyRoot.get())
+    check targetGm.validateRoot(snapshotRoot.get())
 
 # Main test runner
 when isMainModule:

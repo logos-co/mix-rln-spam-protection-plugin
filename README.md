@@ -22,8 +22,9 @@ This plugin provides:
 │    - verifyProof(proof, bindingData) → bool                     │
 │    - proofSize() → 301 bytes (protobuf-encoded)                 │
 ├─────────────────────────────────────────────────────────────────┤
-│  RLN Core (zerokit v0.9.0 FFI)                                  │
+│  RLN Core (zerokit v2.0.0 FFI)                                  │
 │    - Proof generation/verification (RLN-v2 format)              │
+│    - Partial-proof caching for faster steady-state sends         │
 │    - Merkle tree operations                                      │
 │    - Poseidon hash, secret recovery                              │
 ├─────────────────────────────────────────────────────────────────┤
@@ -47,18 +48,18 @@ This plugin provides:
 
 ### Zerokit Library (librln)
 
-This plugin requires the zerokit RLN library (v0.9.0) for proof generation and verification.
+This plugin requires the zerokit RLN library (v2.0.0) for proof generation and verification.
 
 ```bash
 # Option 1: Build from source
 git clone https://github.com/vacp2p/zerokit
 cd zerokit
-git checkout v0.9.0
+git checkout v2.0.0
 cargo build --release -p rln
 cp target/release/librln.a /path/to/your/project/
 
 # Option 2: Download prebuilt
-# https://github.com/vacp2p/zerokit/releases/tag/v0.9.0
+# https://github.com/vacp2p/zerokit/releases/tag/v2.0.0
 ```
 
 ## Installation
@@ -71,7 +72,7 @@ requires "mix_rln_spam_protection >= 0.1.0"
 
 ### Dependencies
 
-- [zerokit-rln](https://github.com/vacp2p/zerokit) v0.9.0 - RLN proving library (static linking)
+- [zerokit-rln](https://github.com/vacp2p/zerokit) v2.0.0 - RLN proving library (static linking)
 - nim >= 2.0.0
 - chronos, results, chronicles, nimcrypto
 
@@ -132,6 +133,10 @@ nim c --passL:librln.a --passL:-lm src/mix_rln_spam_protection.nim
 
 # Run tests
 nim c -r --passL:librln.a --passL:-lm tests/test_all.nim
+
+The plugin now uses zerokit v2's partial-proof APIs. After membership or root
+changes, it refreshes a cached partial proof for the local member and uses that
+cache during normal proof generation when the current root still matches.
 ```
 
 ## Configuration
