@@ -62,6 +62,7 @@ type
     lastEpoch: Epoch
     publishCallback: Option[PublishCallback]
     spamHandler: Option[SpamHandler]
+    epochTimerLoop: Future[void]
 
 proc defaultRlnIdentifier*(): RlnIdentifier =
   ## Get the default RLN identifier.
@@ -181,25 +182,37 @@ proc init*(sp: MixRlnSpamProtection): Future[RlnResult[void]] {.async.} =
   info "MixRlnSpamProtection initialized, waiting for sync"
   ok()
 
+proc runEpochTimer(sp: MixRlnSpamProtection) {.async: (raises: [CancelledError]).} =
+  ## Background timer that detects epoch boundaries and fires OnEpochChange
+  ## callbacks even when no proofs are being generated.
+  while sp.state != PluginState.Stopped:
+    # sleepAsync: epoch timer fires at fixed intervals
+    await sleepAsync(sp.config.epochDurationSeconds.int.seconds)
+    let epoch = currentEpoch(sp.config.epochDurationSeconds)
+    if epoch != sp.lastEpoch:
+      sp.messageIdCounter = 0
+      sp.lastEpoch = epoch
+      sp.notifyEpochChange(epochToUint64(epoch))
+
 proc start*(sp: MixRlnSpamProtection): Future[RlnResult[void]] {.async.} =
   ## Start the spam protection plugin.
   ##
-  ## This starts the group manager sync and nullifier log cleanup.
+  ## This starts the group manager sync, nullifier log cleanup,
+  ## and epoch boundary detection timer.
   ## After start() completes, the plugin is in Ready state.
 
   if sp.state == PluginState.Uninitialized:
     return err("Plugin not initialized")
 
   if sp.state == PluginState.Ready:
-    return ok() # Already started
+    return ok()
 
-  # Start group manager
   let gmStartResult = await sp.groupManager.start()
   if gmStartResult.isErr:
     return err("Failed to start group manager: " & gmStartResult.error)
 
-  # Start nullifier log cleanup
   sp.nullifierLog.start()
+  sp.epochTimerLoop = sp.runEpochTimer()
 
   sp.state = PluginState.Ready
   info "MixRlnSpamProtection started"
@@ -210,10 +223,14 @@ proc stop*(sp: MixRlnSpamProtection) {.async.} =
   if sp.state == PluginState.Stopped:
     return
 
+  sp.state = PluginState.Stopped
+
+  if not sp.epochTimerLoop.isNil and not sp.epochTimerLoop.finished:
+    sp.epochTimerLoop.cancelSoon()
+
   await sp.groupManager.stop()
   await sp.nullifierLog.stop()
 
-  sp.state = PluginState.Stopped
   info "MixRlnSpamProtection stopped"
 
 {.push raises: [], gcsafe.}
@@ -273,10 +290,10 @@ method generateProof*(
 
   let epoch = currentEpoch(sp.config.epochDurationSeconds)
 
-  # Reset message counter if epoch changed
   if epoch != sp.lastEpoch:
     sp.messageIdCounter = 0
     sp.lastEpoch = epoch
+    sp.notifyEpochChange(epochToUint64(epoch))
 
   # Note: Rate limit enforcement happens in zerokit's generate_rln_proof_with_witness FFI call,
   # which validates messageId < userMessageLimit internally. No need to check here.
@@ -463,6 +480,16 @@ method verifyProof*(
     nullifier = proof.nullifier[0 .. 7].toHex() & "..."
 
   ok(true)
+
+method epochDurationSeconds*(
+    sp: MixRlnSpamProtection
+): float64 {.gcsafe, raises: [].} =
+  sp.config.epochDurationSeconds
+
+method rateLimitBudget*(
+    sp: MixRlnSpamProtection
+): int {.gcsafe, raises: [].} =
+  sp.config.userMessageLimit
 
 # Coordination layer handlers
 
