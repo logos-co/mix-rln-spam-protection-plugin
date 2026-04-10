@@ -7,7 +7,7 @@
 ## This module provides the MixRlnSpamProtection type that can be used with
 ## the mix protocol for per-hop proof generation and verification.
 
-import std/options
+import std/[options, deques]
 import chronos
 import results
 import chronicles
@@ -59,6 +59,7 @@ type
     nullifierLog: NullifierLog
     state: PluginState
     messageIdCounter: uint # Tracks messages within current epoch
+    freedMessageIds: Deque[uint] # Reclaimed IDs from discarded cover packets
     lastEpoch: Epoch
     publishCallback: Option[PublishCallback]
     spamHandler: Option[SpamHandler]
@@ -114,6 +115,7 @@ proc newMixRlnSpamProtection*(config: MixRlnConfig): RlnResult[MixRlnSpamProtect
       nullifierLog: nullifierLog,
       state: PluginState.Uninitialized,
       messageIdCounter: 0,
+      freedMessageIds: initDeque[uint](),
       lastEpoch: default(Epoch),
       publishCallback: none(PublishCallback),
       spamHandler: none(SpamHandler),
@@ -191,6 +193,7 @@ proc runEpochTimer(sp: MixRlnSpamProtection) {.async: (raises: [CancelledError])
     let epoch = currentEpoch(sp.config.epochDurationSeconds)
     if epoch != sp.lastEpoch:
       sp.messageIdCounter = 0
+      sp.freedMessageIds.clear()
       sp.lastEpoch = epoch
       sp.notifyEpochChange(epochToUint64(epoch))
 
@@ -276,11 +279,14 @@ proc registerSelf*(
 
 method generateProof*(
     sp: MixRlnSpamProtection, bindingData: seq[byte]
-): Result[seq[byte], string] {.gcsafe, raises: [].} =
+): Result[libp2p_spam.ProofResult, string] {.gcsafe, raises: [].} =
   ## Generate an RLN proof bound to the given packet data.
   ##
   ## For per-hop generation, bindingData is the outgoing Sphinx packet.
   ## The proof is generated using the node's credentials and current epoch.
+  ## Returns a ProofResult with the proof and an opaque token encoding the
+  ## messageId used, which can be reclaimed via reclaimProofToken if the
+  ## packet is discarded before sending.
 
   trace "MixRlnSpamProtection.generateProof called", bindingDataLen = bindingData.len
 
@@ -292,33 +298,82 @@ method generateProof*(
 
   if epoch != sp.lastEpoch:
     sp.messageIdCounter = 0
+    sp.freedMessageIds.clear()
     sp.lastEpoch = epoch
     sp.notifyEpochChange(epochToUint64(epoch))
 
-  # Note: Rate limit enforcement happens in zerokit's generate_rln_proof_with_witness FFI call,
-  # which validates messageId < userMessageLimit internally. No need to check here.
+  # Reuse a freed messageId if available, otherwise allocate the next one
+  let msgId =
+    if sp.freedMessageIds.len > 0:
+      sp.freedMessageIds.popFirst()
+    else:
+      let id = sp.messageIdCounter
+      sp.messageIdCounter += 1
+      id
 
   trace "Calling groupManager.generateProof",
     bindingDataLen = bindingData.len,
-    messageId = sp.messageIdCounter
+    messageId = msgId,
+    reused = (msgId < sp.messageIdCounter)
 
   # Generate proof
   let proof = sp.groupManager.generateProof(
-    bindingData, epoch, sp.config.rlnIdentifier, sp.messageIdCounter
+    bindingData, epoch, sp.config.rlnIdentifier, msgId
   ).valueOr:
     error "GroupManager proof generation failed", error = error
     return err("Failed to generate proof: " & error)
 
-  sp.messageIdCounter += 1
-
   # Serialize proof using protobuf
   let serialized = proof.toBytes()
 
-  debug "Generated RLN proof successfully",
-    epoch = epochToUint64(epoch),
-    messageId = sp.messageIdCounter - 1
+  # Encode messageId (8 bytes) + merkleRoot (32 bytes) as opaque token
+  var token = newSeq[byte](8 + 32)
+  token[0] = byte(msgId shr 56)
+  token[1] = byte(msgId shr 48)
+  token[2] = byte(msgId shr 40)
+  token[3] = byte(msgId shr 32)
+  token[4] = byte(msgId shr 24)
+  token[5] = byte(msgId shr 16)
+  token[6] = byte(msgId shr 8)
+  token[7] = byte(msgId)
+  copyMem(addr token[8], unsafeAddr proof.merkleRoot[0], 32)
 
-  ok(serialized)
+  debug "Generated RLN proof successfully",
+    epoch = epochToUint64(epoch), messageId = msgId
+
+  ok(libp2p_spam.ProofResult(proof: serialized, token: token))
+
+method reclaimProofToken*(
+    sp: MixRlnSpamProtection, token: seq[byte]
+) {.gcsafe, raises: [].} =
+  ## Reclaim a proof slot from a discarded precomputed cover packet.
+  ## Token format: [messageId: 8 bytes][merkleRoot: 32 bytes]
+  if token.len < 8:
+    return
+  let msgId =
+    (uint(token[0]) shl 56) or (uint(token[1]) shl 48) or (uint(token[2]) shl 40) or
+    (uint(token[3]) shl 32) or (uint(token[4]) shl 24) or (uint(token[5]) shl 16) or
+    (uint(token[6]) shl 8) or uint(token[7])
+  sp.freedMessageIds.addLast(msgId)
+  trace "Reclaimed proof token", messageId = msgId
+
+method isProofTokenValid*(
+    sp: MixRlnSpamProtection, token: seq[byte]
+): bool {.gcsafe, raises: [].} =
+  ## Check if the Merkle root embedded in the proof token is still in the
+  ## acceptable roots window. If the root has fallen out of the window
+  ## (due to membership changes), the prebuilt proof would be rejected
+  ## by verifiers and the sender could be flagged as a spammer.
+  ## Token format: [messageId: 8 bytes][merkleRoot: 32 bytes]
+  if token.len < 40:
+    return true # No root info available, assume valid
+  var root: MerkleNode
+  copyMem(addr root[0], unsafeAddr token[8], 32)
+  let valid = sp.groupManager.validateRoot(root)
+  if not valid:
+    trace "Prebuilt proof token has stale Merkle root",
+      root = root[0 .. 7].toHex() & "..."
+  valid
 
 {.pop.}
 
@@ -387,9 +442,7 @@ proc handleSpamDetected(
       await sp.spamHandler.get()(proof, secret, 0)
 
 method verifyProof*(
-    sp: MixRlnSpamProtection,
-    encodedProofData: seq[byte],
-    bindingData: seq[byte],
+    sp: MixRlnSpamProtection, encodedProofData: seq[byte], bindingData: seq[byte]
 ): Result[bool, string] {.gcsafe, raises: [].} =
   ## Verify an RLN proof and check for spam.
   ##
@@ -422,9 +475,7 @@ method verifyProof*(
     return ok(false)
 
   # Verify the zkSNARK proof
-  let isValid = sp.groupManager.verifyProof(
-    proof, bindingData, sp.config.rlnIdentifier
-  ).valueOr:
+  let isValid = sp.groupManager.verifyProof(proof, bindingData, sp.config.rlnIdentifier).valueOr:
     return err("Proof verification error: " & error)
 
   if not isValid:
@@ -481,14 +532,10 @@ method verifyProof*(
 
   ok(true)
 
-method epochDurationSeconds*(
-    sp: MixRlnSpamProtection
-): float64 {.gcsafe, raises: [].} =
+method epochDurationSeconds*(sp: MixRlnSpamProtection): float64 {.gcsafe, raises: [].} =
   sp.config.epochDurationSeconds
 
-method rateLimitBudget*(
-    sp: MixRlnSpamProtection
-): int {.gcsafe, raises: [].} =
+method rateLimitBudget*(sp: MixRlnSpamProtection): int {.gcsafe, raises: [].} =
   sp.config.userMessageLimit
 
 # Coordination layer handlers
@@ -534,8 +581,7 @@ proc loadTree*(sp: MixRlnSpamProtection): RlnResult[void] =
   if loadResult.isOk:
     let memberCount = sp.groupManager.getMemberCount()
     debug "Tree loaded from file",
-      treePath = sp.config.treePath,
-      memberCount = memberCount
+      treePath = sp.config.treePath, memberCount = memberCount
   loadResult
 
 proc restoreCredentialsToTree*(sp: MixRlnSpamProtection): RlnResult[void] =
