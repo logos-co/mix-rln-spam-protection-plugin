@@ -312,12 +312,19 @@ method generateProof*(
     sp.lastEpoch = epoch
     sp.notifyEpochChange(epochToUint64(epoch))
 
-  # Reuse a freed messageId if available, otherwise allocate the next one
+  # Reuse a freed messageId if available, otherwise allocate the next one.
+  # Guard against exceeding userMessageLimit here so callers see a clear
+  # rate-limit error instead of a cryptic failure from deep inside RLN.
   let msgId =
     if sp.freedMessageIds.len > 0:
       sp.freedMessageIds.popFirst()
     else:
       let id = sp.messageIdCounter
+      if id >= uint(sp.config.userMessageLimit):
+        return err(
+          "Message rate limit exceeded for current epoch (messageId=" & $id & ", limit=" &
+            $sp.config.userMessageLimit & ")"
+        )
       sp.messageIdCounter += 1
       id
 
