@@ -7,7 +7,7 @@
 ## This module provides the MixRlnSpamProtection type that can be used with
 ## the mix protocol for per-hop proof generation and verification.
 
-import std/[options, deques]
+import std/[math, options, deques, times]
 import chronos
 import results
 import chronicles
@@ -187,9 +187,19 @@ proc init*(sp: MixRlnSpamProtection): Future[RlnResult[void]] {.async.} =
 proc runEpochTimer(sp: MixRlnSpamProtection) {.async: (raises: [CancelledError]).} =
   ## Background timer that detects epoch boundaries and fires OnEpochChange
   ## callbacks even when no proofs are being generated.
+  ##
+  ## Sleeps until the next absolute epoch boundary on each iteration to avoid
+  ## cumulative drift from processing overhead. This also ensures the first
+  ## tick aligns to the next real epoch boundary rather than
+  ## `startTime + epochDuration`.
   while sp.state != PluginState.Stopped:
-    # sleepAsync: epoch timer fires at fixed intervals
-    await sleepAsync(sp.config.epochDurationSeconds.int.seconds)
+    let
+      nowSec = getTime().toUnixFloat()
+      epochDur = sp.config.epochDurationSeconds
+      timeIntoEpoch = floorMod(nowSec, epochDur)
+      sleepMs = max(1, int((epochDur - timeIntoEpoch) * 1000.0))
+    await sleepAsync(sleepMs)
+
     let epoch = currentEpoch(sp.config.epochDurationSeconds)
     if epoch != sp.lastEpoch:
       sp.messageIdCounter = 0
@@ -228,8 +238,8 @@ proc stop*(sp: MixRlnSpamProtection) {.async.} =
 
   sp.state = PluginState.Stopped
 
-  if not sp.epochTimerLoop.isNil and not sp.epochTimerLoop.finished:
-    sp.epochTimerLoop.cancelSoon()
+  if not sp.epochTimerLoop.isNil:
+    await sp.epochTimerLoop.cancelAndWait()
 
   await sp.groupManager.stop()
   await sp.nullifierLog.stop()

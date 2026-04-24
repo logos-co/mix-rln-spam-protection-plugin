@@ -608,7 +608,7 @@ suite "Spam Detection and Secret Recovery":
     let bindingData = @[byte(10), 20, 30, 40, 50]
     let proofResult = sp.generateProof(bindingData)
     check proofResult.isOk
-    let proofBytes = proofResult.get()
+    let proofBytes = proofResult.get().proof
 
     # Verify the proof
     let verifyResult = sp.verifyProof(proofBytes, bindingData)
