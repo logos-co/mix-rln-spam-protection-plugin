@@ -382,8 +382,9 @@ method isProofTokenValid*(
   ## (due to membership changes), the prebuilt proof would be rejected
   ## by verifiers and the sender could be flagged as a spammer.
   ## Token format: [messageId: 8 bytes][merkleRoot: 32 bytes]
-  if token.len < 40:
-    return true # No root info available, assume valid
+  if token.len != 40:
+    trace "Malformed proof token - rejecting", len = token.len
+    return false
   var root: MerkleNode
   copyMem(addr root[0], unsafeAddr token[8], 32)
   let valid = sp.groupManager.validateRoot(root)

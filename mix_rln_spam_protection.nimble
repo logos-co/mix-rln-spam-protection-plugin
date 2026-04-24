@@ -15,8 +15,8 @@ requires "nimcrypto >= 0.6.0"
 requires "secp256k1 >= 0.5.0"
 requires "json_serialization >= 0.2.0"
 
-# nim-libp2p with cover traffic support (PR #2243)
-requires "https://github.com/vacp2p/nim-libp2p.git#feat/cover-traffic"
+# nim-libp2p with cover traffic support (PR #2243 merged as e1bbda4f6)
+requires "https://github.com/vacp2p/nim-libp2p.git#e1bbda4f6"
 
 # Tasks
 task test, "Run tests":
