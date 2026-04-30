@@ -14,7 +14,7 @@ import chronicles
 import stew/endians2
 
 # Import nim-libp2p spam protection interface
-import libp2p/protocols/mix/spam_protection as libp2p_spam
+import libp2p_mix/spam_protection as libp2p_spam
 
 import ./types
 import ./constants
