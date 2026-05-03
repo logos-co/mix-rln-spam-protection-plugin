@@ -33,9 +33,15 @@ import std/unittest
 # =============================================================================
 
 const
-  # Rate limiting - used across multiple spam detection tests
-  TestUserMessageLimit* = 100'u64
-    ## User message limit used in tests (messages per epoch)
+  # Two distinct stake amounts for tests. Single-member tests can pick either
+  # (TestStakeAmount1 by default); multi-member tests use both to exercise
+  # multi-rate scenarios. Tests compute the per-epoch rate via
+  # computeUserMessageLimit.
+  TestStakeAmount1* = 100'u64 * DefaultStakeUnit
+    ## Yields rate = 100 with DefaultStakeUnit=1000 and DefaultRateMax=1000.
+
+  TestStakeAmount2* = 50'u64 * DefaultStakeUnit
+    ## Yields rate = 50 with DefaultStakeUnit=1000 and DefaultRateMax=1000.
 
   # Membership index - used across multiple tests
   TestMemberIndex* = 0'u64
@@ -344,7 +350,7 @@ suite "Configuration":
 
     check config.epochDurationSeconds == EpochDurationSeconds
     check config.maxEpochGap == MaxEpochGap
-    check config.userMessageLimit == UserMessageLimit
+    check config.stakeAmount == 0  # operator must set before registerSelf
     check config.keystorePath == DefaultKeystorePath
     check config.treePath == DefaultTreePath
 
@@ -352,6 +358,49 @@ suite "Configuration":
     let id = defaultRlnIdentifier()
     # Should have content (from MixRlnIdentifier constant)
     check id.valid()
+
+# =============================================================================
+# RATE LIMIT COMPUTATION TESTS
+# =============================================================================
+
+suite "Rate Limit Computation":
+  test "Mid-range stake yields proportional rate":
+    # Typical case: stakeAmount > DefaultStakeUnit * DefaultRateMin
+    # and stakeAmount < DefaultStakeUnit * DefaultRateMax
+    let result = computeUserMessageLimit(5'u64 * DefaultStakeUnit)
+    check result.isOk
+    check result.get() == 5'u64
+
+  test "Floor-stake yields DefaultRateMin":
+    # stakeAmount = DefaultStakeUnit * DefaultRateMin -> rate = DefaultRateMin
+    let result = computeUserMessageLimit(DefaultStakeUnit * DefaultRateMin)
+    check result.isOk
+    check result.get() == DefaultRateMin
+
+  test "Stake just below floor errors":
+    # stakeAmount < DefaultStakeUnit * DefaultRateMin -> reject
+    let result = computeUserMessageLimit(DefaultStakeUnit * DefaultRateMin - 1'u64)
+    check result.isErr
+
+  test "Zero stake errors":
+    # stakeAmount = 0 -> reject
+    let result = computeUserMessageLimit(0'u64)
+    check result.isErr
+
+  test "Stake above cap yields DefaultRateMax":
+    # stakeAmount > DefaultStakeUnit * DefaultRateMax -> rate = DefaultRateMax
+    let bigStake = (DefaultRateMax + 100'u64) * DefaultStakeUnit
+    let result = computeUserMessageLimit(bigStake)
+    check result.isOk
+    check result.get() == DefaultRateMax
+
+  test "Fractional stake floors correctly":
+    # stakeAmount mod DefaultStakeUnit != 0
+    # -> fractional unit ignored, rate = stakeAmount div DefaultStakeUnit
+    let stake = DefaultStakeUnit * DefaultRateMin + DefaultStakeUnit - 1'u64
+    let result = computeUserMessageLimit(stake)
+    check result.isOk
+    check result.get() == DefaultRateMin
 
 # =============================================================================
 # SPAM DETECTION AND SECRET RECOVERY TESTS (requires zerokit)
@@ -379,7 +428,7 @@ suite "Spam Detection and Secret Recovery":
     let spammerCreds = credResult.get()
 
     # Register spammer in the tree with rate commitment
-    let rateCommitment = computeRateCommitment(spammerCreds.idCommitment, TestUserMessageLimit)
+    let rateCommitment = computeRateCommitment(spammerCreds.idCommitment, computeUserMessageLimit(TestStakeAmount1).get())
     check rateCommitment.isOk
 
     let insertResult = rln.insertMemberAt(TestMemberIndex, rateCommitment.get())
@@ -398,13 +447,13 @@ suite "Spam Detection and Secret Recovery":
     let signal2 = @[byte(5), 6, 7, 8]  # Second message (spam)
 
     let proof1Result = rln.generateRlnProofWithWitness(
-      spammerCreds, TestMemberIndex, epoch, rlnId, signal1, messageId = 0, userMessageLimit = TestUserMessageLimit
+      spammerCreds, TestMemberIndex, epoch, rlnId, signal1, messageId = 0, userMessageLimit = computeUserMessageLimit(TestStakeAmount1).get()
     )
     check proof1Result.isOk
     let proof1 = proof1Result.get()
 
     let proof2Result = rln.generateRlnProofWithWitness(
-      spammerCreds, TestMemberIndex, epoch, rlnId, signal2, messageId = 0, userMessageLimit = TestUserMessageLimit
+      spammerCreds, TestMemberIndex, epoch, rlnId, signal2, messageId = 0, userMessageLimit = computeUserMessageLimit(TestStakeAmount1).get()
     )
     check proof2Result.isOk
     let proof2 = proof2Result.get()
@@ -473,7 +522,7 @@ suite "Spam Detection and Secret Recovery":
     let creds = credResult.get()
 
     # Register member
-    let rateCommitment = computeRateCommitment(creds.idCommitment, TestUserMessageLimit)
+    let rateCommitment = computeRateCommitment(creds.idCommitment, computeUserMessageLimit(TestStakeAmount1).get())
     check rateCommitment.isOk
     let insertResult = rln.insertMemberAt(TestMemberIndex, rateCommitment.get())
     check insertResult.isOk
@@ -490,13 +539,13 @@ suite "Spam Detection and Secret Recovery":
     let signal2 = @[byte(5), 6, 7, 8]
 
     let proof1Result = rln.generateRlnProofWithWitness(
-      creds, TestMemberIndex, epoch, rlnId, signal1, messageId = 0, userMessageLimit = TestUserMessageLimit
+      creds, TestMemberIndex, epoch, rlnId, signal1, messageId = 0, userMessageLimit = computeUserMessageLimit(TestStakeAmount1).get()
     )
     check proof1Result.isOk
     let proof1 = proof1Result.get()
 
     let proof2Result = rln.generateRlnProofWithWitness(
-      creds, TestMemberIndex, epoch, rlnId, signal2, messageId = 1, userMessageLimit = TestUserMessageLimit
+      creds, TestMemberIndex, epoch, rlnId, signal2, messageId = 1, userMessageLimit = computeUserMessageLimit(TestStakeAmount1).get()
     )
     check proof2Result.isOk
     let proof2 = proof2Result.get()
@@ -545,7 +594,7 @@ suite "Spam Detection and Secret Recovery":
     let creds = credResult.get()
 
     # Register member
-    let rateCommitment = computeRateCommitment(creds.idCommitment, TestUserMessageLimit)
+    let rateCommitment = computeRateCommitment(creds.idCommitment, computeUserMessageLimit(TestStakeAmount1).get())
     check rateCommitment.isOk
     let insertResult = rln.insertMemberAt(TestMemberIndex, rateCommitment.get())
     check insertResult.isOk
@@ -559,7 +608,7 @@ suite "Spam Detection and Secret Recovery":
 
     # Generate proof
     let proofResult = rln.generateRlnProofWithWitness(
-      creds, TestMemberIndex, epoch, rlnId, signal, messageId = 0, userMessageLimit = TestUserMessageLimit
+      creds, TestMemberIndex, epoch, rlnId, signal, messageId = 0, userMessageLimit = computeUserMessageLimit(TestStakeAmount1).get()
     )
     check proofResult.isOk
     let proof = proofResult.get()
@@ -582,7 +631,7 @@ suite "Spam Detection and Secret Recovery":
 
     # Create config
     var config = defaultConfig()
-    config.userMessageLimit = int(TestUserMessageLimit)
+    config.stakeAmount = TestStakeAmount1
 
     # Create spam protection instance
     let spResult = newMixRlnSpamProtection(config)
@@ -630,7 +679,7 @@ suite "Partial Proof Cache and Root Tracking":
     let rlnInstance = newRLNInstance()
     check rlnInstance.isOk
 
-    let gm = newOffchainGroupManager(rlnInstance.get(), userMessageLimit = TestUserMessageLimit)
+    let gm = newOffchainGroupManager(rlnInstance.get(), userMessageLimit = computeUserMessageLimit(TestStakeAmount1).get())
     let initResult = waitFor gm.init()
     check initResult.isOk
     let startResult = waitFor gm.start()
@@ -663,7 +712,7 @@ suite "Partial Proof Cache and Root Tracking":
       rlnId,
       signal,
       messageId = 0,
-      userMessageLimit = TestUserMessageLimit,
+      userMessageLimit = computeUserMessageLimit(TestStakeAmount1).get(),
     )
     check proofResult.isOk
 
@@ -675,7 +724,7 @@ suite "Partial Proof Cache and Root Tracking":
       rlnId,
       signal,
       messageId = 0,
-      userMessageLimit = TestUserMessageLimit,
+      userMessageLimit = computeUserMessageLimit(TestStakeAmount1).get(),
     )
     check wrongIndexResult.isErr
 
@@ -687,7 +736,7 @@ suite "Partial Proof Cache and Root Tracking":
     let rlnInstance = newRLNInstance()
     check rlnInstance.isOk
 
-    let gm = newOffchainGroupManager(rlnInstance.get(), userMessageLimit = TestUserMessageLimit)
+    let gm = newOffchainGroupManager(rlnInstance.get(), userMessageLimit = computeUserMessageLimit(TestStakeAmount1).get())
     check (waitFor gm.init()).isOk
     check (waitFor gm.start()).isOk
 
@@ -701,9 +750,16 @@ suite "Partial Proof Cache and Root Tracking":
 
     let peerCreds = generateCredentials()
     check peerCreds.isOk
-    let peerRegister = waitFor gm.register(peerCreds.get().idCommitment)
+    let peerRegister = waitFor gm.registerWithLimit(
+      peerCreds.get().idCommitment, computeUserMessageLimit(TestStakeAmount2).get()
+    )
     check peerRegister.isOk
     let peerIndex = peerRegister.get()
+
+    check gm.getMemberRateLimit(selfCreds.get().idCommitment) ==
+      some(computeUserMessageLimit(TestStakeAmount1).get())
+    check gm.getMemberRateLimit(peerCreds.get().idCommitment) ==
+      some(computeUserMessageLimit(TestStakeAmount2).get())
 
     let rootBeforeRemoval = gm.rlnInstance.getMerkleRoot()
     check rootBeforeRemoval.isOk
@@ -712,6 +768,8 @@ suite "Partial Proof Cache and Root Tracking":
 
     let withdrawResult = waitFor gm.withdraw(peerIndex)
     check withdrawResult.isOk
+
+    check gm.getMemberRateLimit(peerCreds.get().idCommitment) == none(uint64)
 
     let currentRoot = gm.rlnInstance.getMerkleRoot()
     check currentRoot.isOk
@@ -722,13 +780,15 @@ suite "Partial Proof Cache and Root Tracking":
   test "Loading a snapshot replaces previously accepted roots":
     let sourceRln = newRLNInstance()
     check sourceRln.isOk
-    let sourceGm = newOffchainGroupManager(sourceRln.get(), userMessageLimit = TestUserMessageLimit)
+    let sourceGm = newOffchainGroupManager(sourceRln.get(), userMessageLimit = computeUserMessageLimit(TestStakeAmount1).get())
     check (waitFor sourceGm.init()).isOk
     check (waitFor sourceGm.start()).isOk
 
     let memberCreds = generateCredentials()
     check memberCreds.isOk
-    let sourceRegister = waitFor sourceGm.register(memberCreds.get().idCommitment)
+    let sourceRegister = waitFor sourceGm.registerWithLimit(
+      memberCreds.get().idCommitment, computeUserMessageLimit(TestStakeAmount2).get()
+    )
     check sourceRegister.isOk
 
     let snapshot = sourceGm.serializeTreeSnapshot()
@@ -737,7 +797,7 @@ suite "Partial Proof Cache and Root Tracking":
 
     let targetRln = newRLNInstance()
     check targetRln.isOk
-    let targetGm = newOffchainGroupManager(targetRln.get(), userMessageLimit = TestUserMessageLimit)
+    let targetGm = newOffchainGroupManager(targetRln.get(), userMessageLimit = computeUserMessageLimit(TestStakeAmount1).get())
     check (waitFor targetGm.init()).isOk
 
     let emptyRoot = targetGm.rlnInstance.getMerkleRoot()
@@ -751,6 +811,9 @@ suite "Partial Proof Cache and Root Tracking":
     check not targetGm.validateRoot(emptyRoot.get())
     check targetGm.validateRoot(snapshotRoot.get())
 
+    check targetGm.getMemberRateLimit(memberCreds.get().idCommitment) ==
+      some(computeUserMessageLimit(TestStakeAmount2).get())
+
 suite "Epoch Change Notification":
   test "epochDurationSeconds returns configured value":
     let config = MixRlnConfig(epochDurationSeconds: 15.0)
@@ -758,14 +821,17 @@ suite "Epoch Change Notification":
     check sp.isOk
     check sp.get().epochDurationSeconds() == 15.0
 
-  test "rateLimitBudget returns configured userMessageLimit":
-    let config = MixRlnConfig(userMessageLimit: 50)
-    let sp = newMixRlnSpamProtection(config)
-    check sp.isOk
-    check sp.get().rateLimitBudget() == 50
+  test "rateLimitBudget returns computed userMessageLimit":
+    var config = defaultConfig()
+    config.stakeAmount = 50'u64 * DefaultStakeUnit
+    let sp = newMixRlnSpamProtection(config).get()
+    check (waitFor sp.init()).isOk
+    check (waitFor sp.registerSelf()).isOk
+    check sp.rateLimitBudget() == 50
 
   test "registered epoch change callback fires on generateProof":
-    let config = defaultConfig()
+    var config = defaultConfig()
+    config.stakeAmount = TestStakeAmount1
     let sp = newMixRlnSpamProtection(config)
     check sp.isOk
     let plugin = sp.get()

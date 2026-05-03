@@ -9,6 +9,9 @@ const
   MerkleTreeDepth* = 20
     ## Depth of the Merkle tree for membership. Supports 2^20 (~1M) members.
 
+  MaxMembershipIndex* = 1'u64 shl MerkleTreeDepth
+    ## Tree capacity. Valid indices are 0 .. MaxMembershipIndex - 1.
+
   # Cryptographic sizes
   HashByteSize* = 32 ## Size of hash outputs (Poseidon, Keccak256) in bytes.
 
@@ -24,13 +27,30 @@ const
   # Rate limiting parameters
   EpochDurationSeconds* = 10.0
     ## Duration of each epoch in seconds. Nodes can send up to
-    ## UserMessageLimit messages per epoch.
+    ## their stake-derived userMessageLimit messages per epoch.
 
   MaxEpochGap* = 5
     ## Maximum allowed epoch gap between message epoch and current epoch.
     ## Messages outside this window are rejected.
 
-  UserMessageLimit* = 100 ## Maximum number of messages a member can send per epoch.
+  # Stake-weighted rate limiting parameters
+  DefaultRateBase* = 100'u64
+    ## Default flat per-node rate limit per epoch (spec: R_base).
+    ## Used only to derive DefaultRateMax; under stake-weighted registration,
+    ## userMessageLimit is computed from stake.
+
+  DefaultStakeUnit* = 1000'u64
+    ## Default stake required per message per epoch (spec: S_unit).
+
+  DefaultRateMin* = 1'u64
+    ## Default minimum rate (spec: R_min). Nodes with
+    ## stakeAmount < DefaultRateMin * DefaultStakeUnit are rejected.
+
+  DefaultRateMultiplier* = 10'u64
+    ## Default deployment multiplier (spec: f >= 1).
+
+  DefaultRateMax* = DefaultRateMultiplier * DefaultRateBase
+    ## Default maximum rate cap (spec: R_max).
 
   # Root validation
   AcceptableRootWindowSize* = 5
@@ -57,3 +77,23 @@ const
 
   DefaultKeystorePath* = "rln_keystore.json"
     ## Default path for the credentials keystore.
+
+static:
+  # Validate stake-weighted constants at compile time.
+  doAssert DefaultStakeUnit > 0, "DefaultStakeUnit must be > 0"
+  doAssert DefaultRateBase >= 1, "DefaultRateBase must be >= 1"
+  doAssert DefaultRateMultiplier >= 1, "DefaultRateMultiplier (f) must be >= 1"
+  doAssert DefaultRateMin >= 1, "DefaultRateMin must be >= 1"
+  doAssert DefaultRateMax >= DefaultRateMin,
+    "DefaultRateMax must be >= DefaultRateMin"
+  doAssert DefaultRateMax == DefaultRateMultiplier * DefaultRateBase,
+    "DefaultRateMax must equal DefaultRateMultiplier * DefaultRateBase"
+  doAssert DefaultRateMax <= uint64(high(int)),
+    "DefaultRateMax must fit in int (libp2p rateLimitBudget signature)"
+
+  # Validate Merkle tree configuration at compile time.
+  doAssert MerkleTreeDepth > 0, "MerkleTreeDepth must be > 0"
+  doAssert MerkleTreeDepth < sizeof(uint64) * 8,
+    "MerkleTreeDepth must be < bit-width of uint64; else MaxMembershipIndex > high(uint64)"
+  doAssert MaxMembershipIndex == 1'u64 shl MerkleTreeDepth,
+    "MaxMembershipIndex must equal 2^MerkleTreeDepth"

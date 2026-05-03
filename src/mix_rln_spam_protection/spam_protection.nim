@@ -37,7 +37,8 @@ type
       ## Application-specific RLN identifier. Must be the same across all nodes.
     epochDurationSeconds*: float ## Duration of each epoch in seconds. Default: 10.0
     maxEpochGap*: int ## Maximum allowed epoch gap. Default: 5
-    userMessageLimit*: int ## Maximum messages per epoch per member. Default: 100
+    stakeAmount*: uint64
+      ## Operator's committed stake; must be set before registerSelf.
     keystorePath*: string ## Path to the credentials keystore file.
     keystorePassword*: string ## Password for the keystore.
     treePath*: string ## Path for persisting the Merkle tree.
@@ -76,11 +77,12 @@ proc defaultRlnIdentifier*(): RlnIdentifier =
 
 proc defaultConfig*(): MixRlnConfig =
   ## Get the default configuration.
+  ## stakeAmount is left at 0; the caller MUST set it before registerSelf.
   MixRlnConfig(
     rlnIdentifier: defaultRlnIdentifier(),
     epochDurationSeconds: EpochDurationSeconds,
     maxEpochGap: MaxEpochGap,
-    userMessageLimit: UserMessageLimit,
+    stakeAmount: 0,
     keystorePath: DefaultKeystorePath,
     keystorePassword: "",
     treePath: DefaultTreePath,
@@ -98,10 +100,10 @@ proc newMixRlnSpamProtection*(config: MixRlnConfig): RlnResult[MixRlnSpamProtect
   let rlnInstance = newRLNInstance(config.rlnResourcesPath).valueOr:
     return err("Failed to create RLN instance: " & error)
 
-  # Create group manager with configured content topic and message limit
-  let groupManager = newOffchainGroupManager(
-    rlnInstance, config.membershipContentTopic, uint64(config.userMessageLimit)
-  )
+  # Create group manager. userMessageLimit is set later from stake during
+  # registerSelf (or restored from keystore on restart).
+  let groupManager =
+    newOffchainGroupManager(rlnInstance, config.membershipContentTopic, 0'u64)
 
   # Create nullifier log
   let nullifierLog = newNullifierLog()
@@ -153,6 +155,15 @@ proc init*(sp: MixRlnSpamProtection): Future[RlnResult[void]] {.async.} =
       sp.config.keystorePath, sp.config.keystorePassword
     ).valueOr:
       return err("Failed to load/generate credentials: " & error)
+
+    if maybeIndex.isSome:
+      let indexCheck = validateMembershipIndex(maybeIndex.get())
+      if indexCheck.isErr:
+        return err("Keystore: " & indexCheck.error)
+    if maybeRateLimit.isSome:
+      let rateCheck = validateRate(maybeRateLimit.get())
+      if rateCheck.isErr:
+        return err("Keystore: " & rateCheck.error)
 
     sp.groupManager.credentials = some(cred)
     sp.groupManager.membershipIndex = maybeIndex
@@ -252,12 +263,25 @@ proc isReady*(sp: MixRlnSpamProtection): bool =
   ## Check if the plugin is ready for proof operations.
   sp.state == PluginState.Ready and sp.groupManager.isReady()
 
+proc computeUserMessageLimit*(stakeAmount: uint64): RlnResult[uint64] =
+  ## Compute per-node userMessageLimit from stake.
+  ## Returns min(floor(stakeAmount / DefaultStakeUnit), DefaultRateMax),
+  ## or err if stakeAmount < DefaultRateMin * DefaultStakeUnit.
+  let raw = stakeAmount div DefaultStakeUnit
+  if raw < DefaultRateMin:
+    return err(
+      "Stake below floor: requires >= " & $(DefaultRateMin * DefaultStakeUnit) &
+        ", got " & $stakeAmount
+    )
+  ok(min(raw, DefaultRateMax))
+
 proc registerSelf*(
     sp: MixRlnSpamProtection
 ): Future[RlnResult[MembershipIndex]] {.async.} =
-  ## Register this node's credentials with the group.
+  ## Register this node's credentials with the group using stake-weighted rate.
   ##
-  ## This should be called after init() to register the node in the membership tree.
+  ## Computes userMessageLimit from config.stakeAmount, sets it on the group
+  ## manager, registers, and persists the limit to keystore for restart restore.
 
   if sp.state == PluginState.Uninitialized:
     return err("Plugin not initialized")
@@ -267,22 +291,51 @@ proc registerSelf*(
 
   let creds = sp.groupManager.credentials.get()
 
-  # Check if already registered
+  # Idempotent path: already registered (e.g. restored from keystore on restart).
   if sp.groupManager.membershipIndex.isSome:
+    # The keystore must persist the rate limit alongside the membership index.
+    # Without it, the recomputed rateCommitment will not match the network leaf.
+    if sp.groupManager.userMessageLimit == 0:
+      return err("Keystore missing rate limit; re-registration required")
+
+    # Warn on rate drift. Continue using the registered rate (network source of
+    # truth); changing rate requires re-registration.
+    if sp.config.stakeAmount > 0:
+      let newRateRes = computeUserMessageLimit(sp.config.stakeAmount)
+      if newRateRes.isOk and newRateRes.get() != sp.groupManager.userMessageLimit:
+        warn "Computed rate differs from registered rate",
+          configuredStake = sp.config.stakeAmount,
+          computedRate = newRateRes.get(),
+          registeredRate = sp.groupManager.userMessageLimit
+
     return ok(sp.groupManager.membershipIndex.get())
 
-  # Register with group manager
+  # Compute stake-weighted limit and set it on the group manager so
+  # gm.register() uses it when computing rateCommitment.
+  let computedLimit = computeUserMessageLimit(sp.config.stakeAmount).valueOr:
+    return err("Stake validation failed: " & error)
+
+  sp.groupManager.userMessageLimit = computedLimit
+
   let index = await sp.groupManager.register(creds)
   if index.isErr:
     return err("Failed to register: " & index.error)
 
-  # Update keystore with membership index
+  # Reset the epoch-local message counter so a re-registration after
+  # self-withdraw within the same epoch starts from a clean slate.
+  sp.messageIdCounter = 0
+  sp.freedMessageIds.clear()
+
+  # Persist the membership index and the computed rate limit so a restart
+  # can restore the same rateCommitment.
   if sp.config.keystorePassword.len > 0:
     discard saveKeystore(
-      creds, sp.config.keystorePassword, sp.config.keystorePath, some(index.get())
+      creds, sp.config.keystorePassword, sp.config.keystorePath,
+      some(index.get()), some(computedLimit)
     )
 
-  info "Self registered", index = index.get()
+  info "Self registered with stake-weighted rate",
+    index = index.get(), userMessageLimit = computedLimit
   ok(index.get())
 
 # SpamProtection implementation
@@ -320,10 +373,11 @@ method generateProof*(
       sp.freedMessageIds.popFirst()
     else:
       let id = sp.messageIdCounter
-      if id >= uint(sp.config.userMessageLimit):
+      let limit = sp.groupManager.userMessageLimit
+      if id >= uint(limit):
         return err(
-          "Message rate limit exceeded for current epoch (messageId=" & $id & ", limit=" &
-            $sp.config.userMessageLimit & ")"
+          "Message rate limit exceeded for current epoch (messageId=" & $id &
+            ", limit=" & $limit & ")"
         )
       sp.messageIdCounter += 1
       id
@@ -554,7 +608,9 @@ method epochDurationSeconds*(sp: MixRlnSpamProtection): float64 {.gcsafe, raises
   sp.config.epochDurationSeconds
 
 method rateLimitBudget*(sp: MixRlnSpamProtection): int {.gcsafe, raises: [].} =
-  sp.config.userMessageLimit
+  # Returns the per-node rate limit. The libp2p interface mandates int return;
+  # the cast is safe because constants.nim asserts DefaultRateMax <= high(int).
+  int(sp.groupManager.userMessageLimit)
 
 # Coordination layer handlers
 
@@ -612,11 +668,17 @@ proc restoreCredentialsToTree*(sp: MixRlnSpamProtection): RlnResult[void] =
 
     # Check if our member is already in the tree (tracked by idCommitment)
     if not sp.groupManager.hasMemberByIdCommitment(cred.idCommitment):
-      let restoreRes =
-        sp.groupManager.restoreMemberFromKeystore(cred.idCommitment, index)
+      # Restore requires the rate limit used at original registration so the
+      # recomputed rateCommitment matches the on-network leaf.
+      if sp.groupManager.userMessageLimit == 0:
+        return err("Keystore missing rate limit; re-registration required")
+      let restoreRes = sp.groupManager.restoreMemberFromKeystore(
+        cred.idCommitment, index, sp.groupManager.userMessageLimit
+      )
       if restoreRes.isErr:
         return err("Failed to restore member from keystore: " & restoreRes.error)
-      info "Restored credentials to tree", index = index
+      info "Restored credentials to tree",
+        index = index, userMessageLimit = sp.groupManager.userMessageLimit
 
   # Always flush after tree operations to ensure Zerokit internal cache is synced
   if not flush(sp.groupManager.rlnInstance.ctx):
