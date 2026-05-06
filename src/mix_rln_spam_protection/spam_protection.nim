@@ -11,6 +11,7 @@ import std/[math, options, deques, times]
 import chronos
 import results
 import chronicles
+import stew/endians2
 
 # Import nim-libp2p spam protection interface
 import libp2p/protocols/mix/spam_protection as libp2p_spam
@@ -184,6 +185,14 @@ proc init*(sp: MixRlnSpamProtection): Future[RlnResult[void]] {.async.} =
   info "MixRlnSpamProtection initialized, waiting for sync"
   ok()
 
+proc advanceEpoch(sp: MixRlnSpamProtection, epoch: Epoch) =
+  ## Reset all per-epoch state and notify listeners. Centralised so any new
+  ## per-epoch field (counters, pools, caches) only needs to be cleared here.
+  sp.messageIdCounter = 0
+  sp.freedMessageIds.clear()
+  sp.lastEpoch = epoch
+  sp.notifyEpochChange(epochToUint64(epoch))
+
 proc runEpochTimer(sp: MixRlnSpamProtection) {.async: (raises: [CancelledError]).} =
   ## Background timer that detects epoch boundaries and fires OnEpochChange
   ## callbacks even when no proofs are being generated.
@@ -202,10 +211,7 @@ proc runEpochTimer(sp: MixRlnSpamProtection) {.async: (raises: [CancelledError])
 
     let epoch = currentEpoch(sp.config.epochDurationSeconds)
     if epoch != sp.lastEpoch:
-      sp.messageIdCounter = 0
-      sp.freedMessageIds.clear()
-      sp.lastEpoch = epoch
-      sp.notifyEpochChange(epochToUint64(epoch))
+      sp.advanceEpoch(epoch)
 
 proc start*(sp: MixRlnSpamProtection): Future[RlnResult[void]] {.async.} =
   ## Start the spam protection plugin.
@@ -287,6 +293,42 @@ proc registerSelf*(
 
 # SpamProtection implementation
 
+# Proof token layout (opaque to callers):
+#   [epoch: 8 BE][messageId: 8 BE][merkleRoot: 32]
+const
+  ProofTokenEpochOffset = 0
+  ProofTokenMsgIdOffset = 8
+  ProofTokenRootOffset = 16
+  ProofTokenSize = ProofTokenRootOffset + sizeof(MerkleNode) # 48
+
+type ProofToken = object
+  epoch: uint64
+  messageId: uint64
+  merkleRoot: MerkleNode
+
+func encode(t: ProofToken): seq[byte] =
+  result = newSeq[byte](ProofTokenSize)
+  result[ProofTokenEpochOffset ..< ProofTokenMsgIdOffset] = t.epoch.toBytesBE()
+  result[ProofTokenMsgIdOffset ..< ProofTokenRootOffset] = t.messageId.toBytesBE()
+  copyMem(
+    addr result[ProofTokenRootOffset], unsafeAddr t.merkleRoot[0], sizeof(MerkleNode)
+  )
+
+func decode(T: type ProofToken, bytes: openArray[byte]): Result[ProofToken, string] =
+  if bytes.len != ProofTokenSize:
+    return err("invalid proof token length: " & $bytes.len)
+  var token: ProofToken
+  token.epoch = uint64.fromBytesBE(
+    bytes.toOpenArray(ProofTokenEpochOffset, ProofTokenMsgIdOffset - 1)
+  )
+  token.messageId = uint64.fromBytesBE(
+    bytes.toOpenArray(ProofTokenMsgIdOffset, ProofTokenRootOffset - 1)
+  )
+  copyMem(
+    addr token.merkleRoot[0], unsafeAddr bytes[ProofTokenRootOffset], sizeof(MerkleNode)
+  )
+  ok(token)
+
 method generateProof*(
     sp: MixRlnSpamProtection, bindingData: seq[byte]
 ): Result[libp2p_spam.ProofResult, string] {.gcsafe, raises: [].} =
@@ -307,10 +349,7 @@ method generateProof*(
   let epoch = currentEpoch(sp.config.epochDurationSeconds)
 
   if epoch != sp.lastEpoch:
-    sp.messageIdCounter = 0
-    sp.freedMessageIds.clear()
-    sp.lastEpoch = epoch
-    sp.notifyEpochChange(epochToUint64(epoch))
+    sp.advanceEpoch(epoch)
 
   # Reuse a freed messageId if available, otherwise allocate the next one.
   # Guard against exceeding userMessageLimit here so callers see a clear
@@ -343,20 +382,18 @@ method generateProof*(
   # Serialize proof using protobuf
   let serialized = proof.toBytes()
 
-  # Encode messageId (8 bytes) + merkleRoot (32 bytes) as opaque token
-  var token = newSeq[byte](8 + 32)
-  token[0] = byte(msgId shr 56)
-  token[1] = byte(msgId shr 48)
-  token[2] = byte(msgId shr 40)
-  token[3] = byte(msgId shr 32)
-  token[4] = byte(msgId shr 24)
-  token[5] = byte(msgId shr 16)
-  token[6] = byte(msgId shr 8)
-  token[7] = byte(msgId)
-  copyMem(addr token[8], unsafeAddr proof.merkleRoot[0], 32)
+  # Encode epoch + messageId + merkleRoot as opaque token.
+  # The epoch qualifier is critical for safe reclaim: a token built in
+  # epoch N must NOT be reclaimed into epoch N+1's freed pool, or the same
+  # (epoch, messageId) pair could be issued twice in N+1, causing an RLN
+  # double-signal (slashing risk).
+  let
+    epochU64 = epochToUint64(epoch)
+    token = ProofToken(
+      epoch: epochU64, messageId: msgId.uint64, merkleRoot: proof.merkleRoot
+    ).encode()
 
-  debug "Generated RLN proof successfully",
-    epoch = epochToUint64(epoch), messageId = msgId
+  debug "Generated RLN proof successfully", epoch = epochU64, messageId = msgId
 
   ok(libp2p_spam.ProofResult(proof: serialized, token: token))
 
@@ -364,15 +401,24 @@ method reclaimProofToken*(
     sp: MixRlnSpamProtection, token: seq[byte]
 ) {.gcsafe, raises: [].} =
   ## Reclaim a proof slot from a discarded precomputed cover packet.
-  ## Token format: [messageId: 8 bytes][merkleRoot: 32 bytes]
-  if token.len < 8:
+  ##
+  ## Cross-epoch reclaims are silently dropped: a token built in epoch N must
+  ## never be reclaimed in epoch N+1 because the messageId allocation is
+  ## per-epoch. Reusing a stale messageId from epoch N inside epoch N+1 would
+  ## risk a double-signal (and RLN slashing) once the counter naturally
+  ## reissues the same id.
+  let decoded = ProofToken.decode(token).valueOr:
+    trace "Malformed proof token - dropping reclaim", len = token.len
     return
-  let msgId =
-    (uint(token[0]) shl 56) or (uint(token[1]) shl 48) or (uint(token[2]) shl 40) or
-    (uint(token[3]) shl 32) or (uint(token[4]) shl 24) or (uint(token[5]) shl 16) or
-    (uint(token[6]) shl 8) or uint(token[7])
-  sp.freedMessageIds.addLast(msgId)
-  trace "Reclaimed proof token", messageId = msgId
+
+  let currentEpochU64 = epochToUint64(currentEpoch(sp.config.epochDurationSeconds))
+  if decoded.epoch != currentEpochU64:
+    trace "Cross-epoch proof token reclaim dropped",
+      tokenEpoch = decoded.epoch, currentEpoch = currentEpochU64
+    return
+
+  sp.freedMessageIds.addLast(uint(decoded.messageId))
+  trace "Reclaimed proof token", epoch = decoded.epoch, messageId = decoded.messageId
 
 method isProofTokenValid*(
     sp: MixRlnSpamProtection, token: seq[byte]
@@ -381,12 +427,10 @@ method isProofTokenValid*(
   ## acceptable roots window. If the root has fallen out of the window
   ## (due to membership changes), the prebuilt proof would be rejected
   ## by verifiers and the sender could be flagged as a spammer.
-  ## Token format: [messageId: 8 bytes][merkleRoot: 32 bytes]
-  if token.len != 40:
+  let decoded = ProofToken.decode(token).valueOr:
     trace "Malformed proof token - rejecting", len = token.len
     return false
-  var root: MerkleNode
-  copyMem(addr root[0], unsafeAddr token[8], 32)
+  let root = decoded.merkleRoot
   let valid = sp.groupManager.validateRoot(root)
   if not valid:
     trace "Prebuilt proof token has stale Merkle root",
