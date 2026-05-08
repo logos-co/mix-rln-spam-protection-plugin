@@ -2,7 +2,7 @@
 # Copyright (c) 2025 vacp2p
 # Licensed under either of Apache License 2.0 or MIT license.
 
-## Main spam protection interface implementing the nim-libp2p SpamProtectionInterface.
+## Main spam protection interface implementing the libp2p_mix SpamProtectionInterface.
 ##
 ## This module provides the MixRlnSpamProtection type that can be used with
 ## the mix protocol for per-hop proof generation and verification.
@@ -13,7 +13,7 @@ import results
 import chronicles
 import stew/endians2
 
-# Import nim-libp2p spam protection interface
+# Import libp2p_mix spam protection interface
 import libp2p_mix/spam_protection as libp2p_spam
 
 import ./types
@@ -25,7 +25,7 @@ import ./nullifier_log
 import ./credentials
 
 export types, constants, codec, group_manager, nullifier_log, credentials
-# Re-export nim-libp2p types for convenience
+# Re-export libp2p_mix types for convenience
 export libp2p_spam.SpamProtection
 
 logScope:
@@ -48,11 +48,11 @@ type
     proofMetadataContentTopic*: string
       ## Content topic for broadcasting proof metadata. Default: "/mix/rln/metadata/v1"
 
-  # Main spam protection implementation - inherits from nim-libp2p interface
+  # Main spam protection implementation - inherits from libp2p_mix interface
   MixRlnSpamProtection* = ref object of libp2p_spam.SpamProtection
     ## RLN-based spam protection for mix networks.
     ##
-    ## Implements the SpamProtection interface from nim-libp2p for
+    ## Implements the SpamProtection interface from libp2p_mix for
     ## per-hop proof generation and verification.
     config: MixRlnConfig
     rlnInstance: RLNInstance

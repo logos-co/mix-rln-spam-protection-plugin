@@ -19,7 +19,7 @@ requires "json_serialization >= 0.2.0"
 requires "https://github.com/vacp2p/nim-libp2p.git#e1bbda4f6"
 
 # libp2p_mix — extracted into its own repo; previously libp2p/protocols/mix
-requires "https://github.com/logos-co/nim-libp2p-mix.git#master"
+requires "https://github.com/logos-co/nim-libp2p-mix.git#f24cd25a54e2156d66b497f6d576aab3ccfc8fa6"
 
 # Tasks
 task test, "Run tests":
