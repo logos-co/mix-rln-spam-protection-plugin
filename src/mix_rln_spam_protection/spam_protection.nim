@@ -201,13 +201,21 @@ proc runEpochTimer(sp: MixRlnSpamProtection) {.async: (raises: [CancelledError])
   ## cumulative drift from processing overhead. This also ensures the first
   ## tick aligns to the next real epoch boundary rather than
   ## `startTime + epochDuration`.
+  ##
+  ## A 1 ms epsilon is added to `sleepMs` so we wake strictly *after* the
+  ## boundary: `calcEpoch` uses ceil semantics, so the boundary time itself
+  ## (e.g. t == 10.0 for epochDur == 10) still belongs to the previous epoch.
+  ## Without the epsilon, a wake-up landing exactly on the boundary would see
+  ## the old epoch and miss the transition for a full period.
   while sp.state != PluginState.Stopped:
     let
       nowSec = getTime().toUnixFloat()
       epochDur = sp.config.epochDurationSeconds
       timeIntoEpoch = floorMod(nowSec, epochDur)
-      sleepMs = max(1, int((epochDur - timeIntoEpoch) * 1000.0))
-    await sleepAsync(sleepMs)
+      sleepMs = max(1, int((epochDur - timeIntoEpoch) * 1000.0)) + 1
+    # chronos.milliseconds is qualified to disambiguate from std/times.milliseconds
+    # (which returns TimeInterval, not chronos.Duration).
+    await sleepAsync(chronos.milliseconds(sleepMs))
 
     let epoch = currentEpoch(sp.config.epochDurationSeconds)
     if epoch != sp.lastEpoch:
@@ -354,9 +362,9 @@ method generateProof*(
   # Reuse a freed messageId if available, otherwise allocate the next one.
   # Guard against exceeding userMessageLimit here so callers see a clear
   # rate-limit error instead of a cryptic failure from deep inside RLN.
-  let msgId =
+  let (msgId, reused) =
     if sp.freedMessageIds.len > 0:
-      sp.freedMessageIds.popFirst()
+      (sp.freedMessageIds.popFirst(), true)
     else:
       let id = sp.messageIdCounter
       if id >= uint(sp.config.userMessageLimit):
@@ -365,12 +373,10 @@ method generateProof*(
             $sp.config.userMessageLimit & ")"
         )
       sp.messageIdCounter += 1
-      id
+      (id, false)
 
   trace "Calling groupManager.generateProof",
-    bindingDataLen = bindingData.len,
-    messageId = msgId,
-    reused = (msgId < sp.messageIdCounter)
+    bindingDataLen = bindingData.len, messageId = msgId, reused = reused
 
   # Generate proof
   let proof = sp.groupManager.generateProof(
@@ -402,11 +408,15 @@ method reclaimProofToken*(
 ) {.gcsafe, raises: [].} =
   ## Reclaim a proof slot from a discarded precomputed cover packet.
   ##
-  ## Cross-epoch reclaims are silently dropped: a token built in epoch N must
-  ## never be reclaimed in epoch N+1 because the messageId allocation is
-  ## per-epoch. Reusing a stale messageId from epoch N inside epoch N+1 would
-  ## risk a double-signal (and RLN slashing) once the counter naturally
-  ## reissues the same id.
+  ## Drops the reclaim silently (trace only) on any of:
+  ##   - malformed token
+  ##   - cross-epoch token (epoch N reclaimed in epoch N+1)
+  ##   - out-of-range messageId (>= userMessageLimit)
+  ##   - messageId not yet allocated in this epoch (>= messageIdCounter)
+  ##   - duplicate reclaim of an id already in the freed pool
+  ##
+  ## Each guard prevents the same (epoch, messageId) pair from being issued
+  ## twice in one epoch — i.e. an RLN double-signal / slashing risk.
   let decoded = ProofToken.decode(token).valueOr:
     trace "Malformed proof token - dropping reclaim", len = token.len
     return
@@ -417,7 +427,26 @@ method reclaimProofToken*(
       tokenEpoch = decoded.epoch, currentEpoch = currentEpochU64
     return
 
-  sp.freedMessageIds.addLast(uint(decoded.messageId))
+  if decoded.messageId >= uint64(sp.config.userMessageLimit):
+    trace "Out-of-range messageId in reclaim - dropping",
+      messageId = decoded.messageId, limit = sp.config.userMessageLimit
+    return
+
+  if decoded.messageId >= sp.messageIdCounter.uint64:
+    trace "Reclaim of unallocated messageId - dropping",
+      messageId = decoded.messageId, counter = sp.messageIdCounter
+    return
+
+  # Linear scan for duplicate is O(N) but N is bounded by userMessageLimit;
+  # this keeps the hot generateProof path scan-free.
+  let id = uint(decoded.messageId)
+  for existing in sp.freedMessageIds:
+    if existing == id:
+      trace "Duplicate proof token reclaim - dropping",
+        epoch = decoded.epoch, messageId = decoded.messageId
+      return
+
+  sp.freedMessageIds.addLast(id)
   trace "Reclaimed proof token", epoch = decoded.epoch, messageId = decoded.messageId
 
 method isProofTokenValid*(

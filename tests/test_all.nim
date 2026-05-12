@@ -753,14 +753,16 @@ suite "Partial Proof Cache and Root Tracking":
 
 suite "Epoch Change Notification":
   test "epochDurationSeconds returns configured value":
-    let config = MixRlnConfig(epochDurationSeconds: 15.0)
-    let sp = newMixRlnSpamProtection(config)
+    var cfg = defaultConfig()
+    cfg.epochDurationSeconds = 15.0
+    let sp = newMixRlnSpamProtection(cfg)
     check sp.isOk
     check sp.get().epochDurationSeconds() == 15.0
 
   test "rateLimitBudget returns configured userMessageLimit":
-    let config = MixRlnConfig(userMessageLimit: 50)
-    let sp = newMixRlnSpamProtection(config)
+    var cfg = defaultConfig()
+    cfg.userMessageLimit = 50
+    let sp = newMixRlnSpamProtection(cfg)
     check sp.isOk
     check sp.get().rateLimitBudget() == 50
 
@@ -787,6 +789,32 @@ suite "Epoch Change Notification":
     check proofResult.isOk
     # First call sets lastEpoch, callback fires with current epoch
     check receivedEpoch > 0
+
+    waitFor plugin.stop()
+
+  test "epoch change callback fires from background timer while idle":
+    # Exercises the background runEpochTimer path: no generateProof calls
+    # are made, so the callback can only fire if the timer detected a
+    # boundary on its own.
+    var cfg = defaultConfig()
+    cfg.epochDurationSeconds = 1.0
+    let sp = newMixRlnSpamProtection(cfg)
+    check sp.isOk
+    let plugin = sp.get()
+
+    check (waitFor plugin.init()).isOk
+    check (waitFor plugin.registerSelf()).isOk
+    check (waitFor plugin.start()).isOk
+
+    var fired = false
+    plugin.registerOnEpochChange(
+      proc(epoch: uint64) {.gcsafe, raises: [].} =
+        fired = true
+    )
+
+    # Sleep > 1 epoch so at least one boundary must be crossed.
+    waitFor sleepAsync(1500.milliseconds)
+    check fired
 
     waitFor plugin.stop()
 

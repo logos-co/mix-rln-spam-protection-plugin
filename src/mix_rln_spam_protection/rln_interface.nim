@@ -8,7 +8,6 @@
 
 import std/os
 import results, chronicles
-import stew/arrayops
 import ./types
 import ./constants
 
