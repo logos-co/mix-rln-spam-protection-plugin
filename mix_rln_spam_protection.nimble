@@ -8,15 +8,15 @@ srcDir = "src"
 # Dependencies
 requires "nim >= 2.0.0"
 requires "results >= 0.4.0"
-requires "stew >= 0.1.0"
-requires "chronicles >= 0.10.0"
-requires "chronos >= 4.0.0"
+requires "stew >= 0.4.2"
+requires "chronicles >= 0.11.0"
+requires "chronos >= 4.2.2"
 requires "nimcrypto >= 0.6.0"
 requires "secp256k1 >= 0.5.0"
 requires "json_serialization >= 0.2.0"
 
-# nim-libp2p with mix spam protection (PR #2037 merged)
-requires "https://github.com/vacp2p/nim-libp2p.git#525a9dd3fb381c4e5fa4429cf0bf664814e4d67e"
+# nim-libp2p with cover traffic support (PR #2243 merged as e1bbda4f6)
+requires "https://github.com/vacp2p/nim-libp2p.git#e1bbda4f6"
 
 # Tasks
 task test, "Run tests":

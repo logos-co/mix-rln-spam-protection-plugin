@@ -23,6 +23,7 @@ import ../src/mix_rln_spam_protection/constants
 import ../src/mix_rln_spam_protection/codec
 import ../src/mix_rln_spam_protection/nullifier_log
 import ../src/mix_rln_spam_protection/rln_interface
+import libp2p/protocols/mix/spam_protection as libp2p_spam
 
 # Use std/unittest (testutils/unittests available in logos-messaging-nim context)
 import std/unittest
@@ -607,7 +608,7 @@ suite "Spam Detection and Secret Recovery":
     let bindingData = @[byte(10), 20, 30, 40, 50]
     let proofResult = sp.generateProof(bindingData)
     check proofResult.isOk
-    let proofBytes = proofResult.get()
+    let proofBytes = proofResult.get().proof
 
     # Verify the proof
     let verifyResult = sp.verifyProof(proofBytes, bindingData)
@@ -749,6 +750,73 @@ suite "Partial Proof Cache and Root Tracking":
 
     check not targetGm.validateRoot(emptyRoot.get())
     check targetGm.validateRoot(snapshotRoot.get())
+
+suite "Epoch Change Notification":
+  test "epochDurationSeconds returns configured value":
+    var cfg = defaultConfig()
+    cfg.epochDurationSeconds = 15.0
+    let sp = newMixRlnSpamProtection(cfg)
+    check sp.isOk
+    check sp.get().epochDurationSeconds() == 15.0
+
+  test "rateLimitBudget returns configured userMessageLimit":
+    var cfg = defaultConfig()
+    cfg.userMessageLimit = 50
+    let sp = newMixRlnSpamProtection(cfg)
+    check sp.isOk
+    check sp.get().rateLimitBudget() == 50
+
+  test "registered epoch change callback fires on generateProof":
+    let config = defaultConfig()
+    let sp = newMixRlnSpamProtection(config)
+    check sp.isOk
+    let plugin = sp.get()
+
+    let initResult = waitFor plugin.init()
+    check initResult.isOk
+    let registerResult = waitFor plugin.registerSelf()
+    check registerResult.isOk
+    let startResult = waitFor plugin.start()
+    check startResult.isOk
+
+    var receivedEpoch: uint64 = 0
+    plugin.registerOnEpochChange(
+      proc(epoch: uint64) {.gcsafe, raises: [].} =
+        receivedEpoch = epoch
+    )
+
+    let proofResult = plugin.generateProof(@[byte(1), 2, 3])
+    check proofResult.isOk
+    # First call sets lastEpoch, callback fires with current epoch
+    check receivedEpoch > 0
+
+    waitFor plugin.stop()
+
+  test "epoch change callback fires from background timer while idle":
+    # Exercises the background runEpochTimer path: no generateProof calls
+    # are made, so the callback can only fire if the timer detected a
+    # boundary on its own.
+    var cfg = defaultConfig()
+    cfg.epochDurationSeconds = 1.0
+    let sp = newMixRlnSpamProtection(cfg)
+    check sp.isOk
+    let plugin = sp.get()
+
+    check (waitFor plugin.init()).isOk
+    check (waitFor plugin.registerSelf()).isOk
+    check (waitFor plugin.start()).isOk
+
+    var fired = false
+    plugin.registerOnEpochChange(
+      proc(epoch: uint64) {.gcsafe, raises: [].} =
+        fired = true
+    )
+
+    # Sleep > 1 epoch so at least one boundary must be crossed.
+    waitFor sleepAsync(1500.milliseconds)
+    check fired
+
+    waitFor plugin.stop()
 
 # Main test runner
 when isMainModule:
