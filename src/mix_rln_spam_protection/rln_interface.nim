@@ -2,9 +2,13 @@
 # Copyright (c) 2025 vacp2p
 # Licensed under either of Apache License 2.0 or MIT license.
 
-## Nim wrappers for zerokit RLN v2.0.0.
+## Nim wrappers for zerokit RLN v2.0.2 (non-stateless build).
 ## The higher-level API is kept intentionally close to the previous wrapper so
 ## the rest of the plugin can migrate with minimal churn.
+##
+## Build: this plugin requires zerokit's default features (pmtree-ft local
+## Merkle tree); the `stateless` cargo feature must NOT be enabled, as we
+## rely on `ffi_set_next_leaf`/`ffi_get_root`/`ffi_get_merkle_proof` etc.
 
 import std/os
 import results, chronicles
@@ -72,10 +76,6 @@ type
     ok: ptr FFI_MerkleProof
     err: Vec_uint8
 
-  CResultVecCFrVecU8 = object
-    ok: Vec_CFr
-    err: Vec_uint8
-
   CResultVecU8VecU8 = object
     ok: Vec_uint8
     err: Vec_uint8
@@ -96,8 +96,9 @@ type
     ctx*: ptr RLN
 
 const
-  SingleVersionByte = 0x00'u8
   FieldElementSize = 32
+  # Single-message-id RLN proof wire layout: outer version byte + 128-byte
+  # Groth16 + inner RLNProofValues (inner version + 5 field elements).
   ProofSerializationSize = 1 + ZksnarkProofByteSize + 1 + 5 * FieldElementSize
 
 proc computeExternalNullifier*(
@@ -107,8 +108,10 @@ proc computeExternalNullifier*(
 proc ffi_cfr_free(cfr: ptr CFr) {.importc: "ffi_cfr_free", cdecl.}
 proc ffi_cfr_to_bytes_le(cfr: ptr CFr): Vec_uint8 {.importc: "ffi_cfr_to_bytes_le", cdecl.}
 proc ffi_bytes_le_to_cfr(bytes: ptr Vec_uint8): CResultCFrPtrVecU8 {.importc: "ffi_bytes_le_to_cfr", cdecl.}
-proc ffi_hash_to_field_le(input: ptr Vec_uint8): CResultCFrPtrVecU8 {.importc: "ffi_hash_to_field_le", cdecl.}
-proc ffi_poseidon_hash_pair(a: ptr CFr, b: ptr CFr): CResultCFrPtrVecU8 {.importc: "ffi_poseidon_hash_pair", cdecl.}
+# v2.0.1: hash_to_field_le / poseidon_hash_pair return ptr CFr directly
+# (no Result wrapper) — caller MUST ffi_cfr_free the returned ptr.
+proc ffi_hash_to_field_le(input: ptr Vec_uint8): ptr CFr {.importc: "ffi_hash_to_field_le", cdecl.}
+proc ffi_poseidon_hash_pair(a: ptr CFr, b: ptr CFr): ptr CFr {.importc: "ffi_poseidon_hash_pair", cdecl.}
 
 proc ffi_vec_cfr_new(capacity: CSize): Vec_CFr {.importc: "ffi_vec_cfr_new", cdecl.}
 proc ffi_vec_cfr_push(v: ptr Vec_CFr, cfr: ptr CFr) {.importc: "ffi_vec_cfr_push", cdecl.}
@@ -118,8 +121,10 @@ proc ffi_vec_cfr_free(v: Vec_CFr) {.importc: "ffi_vec_cfr_free", cdecl.}
 proc ffi_vec_u8_free(v: Vec_uint8) {.importc: "ffi_vec_u8_free", cdecl.}
 proc ffi_c_string_free(s: Vec_uint8) {.importc: "ffi_c_string_free", cdecl.}
 
-proc ffi_extended_key_gen(): CResultVecCFrVecU8 {.importc: "ffi_extended_key_gen", cdecl.}
-proc ffi_seeded_extended_key_gen(seed: ptr Vec_uint8): CResultVecCFrVecU8 {.importc: "ffi_seeded_extended_key_gen", cdecl.}
+# v2.0.1: extended_key_gen / seeded_extended_key_gen return Vec_CFr directly
+# (no Result wrapper) — caller MUST ffi_vec_cfr_free the returned vec.
+proc ffi_extended_key_gen(): Vec_CFr {.importc: "ffi_extended_key_gen", cdecl.}
+proc ffi_seeded_extended_key_gen(seed: ptr Vec_uint8): Vec_CFr {.importc: "ffi_seeded_extended_key_gen", cdecl.}
 
 proc ffi_rln_new(treeDepth: CSize, config: cstring): CResultRLNPtrVecU8 {.importc: "ffi_rln_new", cdecl.}
 proc ffi_rln_new_with_params(
@@ -193,6 +198,16 @@ proc ffi_compute_id_secret(
 proc ffi_rln_proof_get_values(proof: ptr ptr FFI_RLNProof): ptr FFI_RLNProofValues {.importc: "ffi_rln_proof_get_values", cdecl.}
 proc ffi_rln_proof_to_bytes_le(proof: ptr ptr FFI_RLNProof): CResultVecU8VecU8 {.importc: "ffi_rln_proof_to_bytes_le", cdecl.}
 proc ffi_bytes_le_to_rln_proof(bytes: ptr Vec_uint8): CResultProofPtrVecU8 {.importc: "ffi_bytes_le_to_rln_proof", cdecl.}
+# v2.0.2: construct an RLNProof directly from its field elements (single
+# message-id variant), avoiding the manual 290-byte wire layout.
+proc ffi_rln_proof_new(
+  groth16Bytes: ptr Vec_uint8,
+  root: ptr CFr,
+  externalNullifier: ptr CFr,
+  x: ptr CFr,
+  y: ptr CFr,
+  nullifier: ptr CFr,
+): CResultProofPtrVecU8 {.importc: "ffi_rln_proof_new", cdecl.}
 proc ffi_rln_proof_free(p: ptr FFI_RLNProof) {.importc: "ffi_rln_proof_free", cdecl.}
 
 proc ffi_rln_partial_proof_to_bytes_le(partial_proof: ptr ptr FFI_RLNPartialProof): CResultVecU8VecU8 {.importc: "ffi_rln_partial_proof_to_bytes_le", cdecl.}
@@ -292,10 +307,10 @@ proc bytesToCfrLe(data: openArray[byte]): RlnResult[ptr CFr] =
 
 proc hashToFieldLe(data: openArray[byte]): RlnResult[ptr CFr] =
   var vec = toVecUint8(data)
-  let res = ffi_hash_to_field_le(addr vec)
-  if not res.ok.isNil:
-    return ok(res.ok)
-  err(consumeError("Failed to hash to field: ", res.err))
+  let cfr = ffi_hash_to_field_le(addr vec)
+  if cfr.isNil:
+    return err("Failed to hash to field")
+  ok(cfr)
 
 proc poseidonPairLe(a, b: openArray[byte]): RlnResult[array[32, byte]] =
   let aPtr = bytesToCfrLe(a).valueOr:
@@ -308,13 +323,13 @@ proc poseidonPairLe(a, b: openArray[byte]): RlnResult[array[32, byte]] =
   defer:
     ffi_cfr_free(bPtr)
 
-  let res = ffi_poseidon_hash_pair(aPtr, bPtr)
-  if res.ok.isNil:
-    return err(consumeError("Poseidon hash failed: ", res.err))
+  let cfr = ffi_poseidon_hash_pair(aPtr, bPtr)
+  if cfr.isNil:
+    return err("Poseidon hash failed")
   defer:
-    ffi_cfr_free(res.ok)
+    ffi_cfr_free(cfr)
 
-  cfrToBytesLe(res.ok)
+  cfrToBytesLe(cfr)
 
 proc cfrResultToBytes(res: CResultCFrPtrVecU8, prefix: string): RlnResult[array[32, byte]] =
   if res.ok.isNil:
@@ -341,39 +356,6 @@ proc getCurrentRootRaw(instance: RLNInstance): RlnResult[MerkleNode] =
   defer:
     ffi_cfr_free(rootPtr)
   cfrToBytesLe(rootPtr)
-
-proc buildProofBytesLe(
-    proof: RateLimitProof, rlnIdentifier: RlnIdentifier
-): RlnResult[seq[byte]] =
-  let externalNullifier = computeExternalNullifier(proof.epoch, rlnIdentifier).valueOr:
-    return err("Failed to compute external nullifier: " & error)
-
-  var encoded = newSeq[byte](ProofSerializationSize)
-  var offset = 0
-
-  encoded[offset] = SingleVersionByte
-  inc offset
-
-  copyMem(addr encoded[offset], unsafeAddr proof.proof[0], ZksnarkProofByteSize)
-  offset += ZksnarkProofByteSize
-
-  encoded[offset] = SingleVersionByte
-  inc offset
-
-  copyMem(addr encoded[offset], unsafeAddr proof.merkleRoot[0], HashByteSize)
-  offset += HashByteSize
-
-  copyMem(addr encoded[offset], unsafeAddr externalNullifier[0], HashByteSize)
-  offset += HashByteSize
-
-  copyMem(addr encoded[offset], unsafeAddr proof.shareX[0], HashByteSize)
-  offset += HashByteSize
-
-  copyMem(addr encoded[offset], unsafeAddr proof.shareY[0], HashByteSize)
-  offset += HashByteSize
-
-  copyMem(addr encoded[offset], unsafeAddr proof.nullifier[0], HashByteSize)
-  ok(encoded)
 
 proc proofPtrToRateLimitProof(
     proofPtr: ptr FFI_RLNProof, epoch: Epoch
@@ -559,22 +541,18 @@ proc buildWitness(
 
   ok(witnessRes.ok)
 
-proc membershipKeyGen*(): RlnResult[IdentityCredential] =
-  let res = ffi_extended_key_gen()
-  if hasError(res.err):
-    return err(consumeError("Key generation failed: ", res.err))
-  defer:
-    ffi_vec_cfr_free(res.ok)
-
-  if int(ffi_vec_cfr_len(addr res.ok)) != 4:
+proc parseCredentialVec(vec: var Vec_CFr): RlnResult[IdentityCredential] =
+  ## ffi_extended_key_gen returns a Vec_CFr of exactly 4 elements:
+  ## [ idTrapdoor, idNullifier, idSecretHash, idCommitment ].
+  if int(ffi_vec_cfr_len(addr vec)) != 4:
     return err("Unexpected credential element count")
 
   var cred: IdentityCredential
   let fields = [
-    ffi_vec_cfr_get(addr res.ok, 0),
-    ffi_vec_cfr_get(addr res.ok, 1),
-    ffi_vec_cfr_get(addr res.ok, 2),
-    ffi_vec_cfr_get(addr res.ok, 3),
+    ffi_vec_cfr_get(addr vec, 0),
+    ffi_vec_cfr_get(addr vec, 1),
+    ffi_vec_cfr_get(addr vec, 2),
+    ffi_vec_cfr_get(addr vec, 3),
   ]
   for field in fields:
     if field.isNil:
@@ -586,35 +564,19 @@ proc membershipKeyGen*(): RlnResult[IdentityCredential] =
   cred.idCommitment = cfrToBytesLe(fields[3]).valueOr: return err(error)
 
   ok(cred)
+
+proc membershipKeyGen*(): RlnResult[IdentityCredential] =
+  var vec = ffi_extended_key_gen()
+  defer:
+    ffi_vec_cfr_free(vec)
+  parseCredentialVec(vec)
 
 proc membershipKeyGen*(seed: openArray[byte]): RlnResult[IdentityCredential] =
   var seedVec = toVecUint8(seed)
-  let res = ffi_seeded_extended_key_gen(addr seedVec)
-  if hasError(res.err):
-    return err(consumeError("Seeded key generation failed: ", res.err))
+  var vec = ffi_seeded_extended_key_gen(addr seedVec)
   defer:
-    ffi_vec_cfr_free(res.ok)
-
-  if int(ffi_vec_cfr_len(addr res.ok)) != 4:
-    return err("Unexpected credential element count")
-
-  var cred: IdentityCredential
-  let fields = [
-    ffi_vec_cfr_get(addr res.ok, 0),
-    ffi_vec_cfr_get(addr res.ok, 1),
-    ffi_vec_cfr_get(addr res.ok, 2),
-    ffi_vec_cfr_get(addr res.ok, 3),
-  ]
-  for field in fields:
-    if field.isNil:
-      return err("Missing credential field from zerokit")
-
-  cred.idTrapdoor = cfrToBytesLe(fields[0]).valueOr: return err(error)
-  cred.idNullifier = cfrToBytesLe(fields[1]).valueOr: return err(error)
-  cred.idSecretHash = cfrToBytesLe(fields[2]).valueOr: return err(error)
-  cred.idCommitment = cfrToBytesLe(fields[3]).valueOr: return err(error)
-
-  ok(cred)
+    ffi_vec_cfr_free(vec)
+  parseCredentialVec(vec)
 
 proc generateMembershipKey*(): RlnResult[IdentityCredential] =
   membershipKeyGen()
@@ -937,12 +899,44 @@ proc verifyRlnProof*(
     signal: openArray[byte],
     validRoots: seq[MerkleNode] = @[],
 ): RlnResult[bool] {.gcsafe.} =
-  let proofBytes = buildProofBytesLe(proof, rlnIdentifier).valueOr:
-    return err(error)
-  var proofVec = toVecUint8(proofBytes)
-  let proofRes = ffi_bytes_le_to_rln_proof(addr proofVec)
+  # v2.0.2: build the FFI_RLNProof directly from its field elements via
+  # ffi_rln_proof_new, instead of round-tripping through the 290-byte
+  # wire layout.
+  let externalNullifier = computeExternalNullifier(proof.epoch, rlnIdentifier).valueOr:
+    return err("Failed to compute external nullifier: " & error)
+
+  var groth16Vec = toVecUint8(proof.proof)
+
+  let rootFr = bytesToCfrLe(proof.merkleRoot).valueOr:
+    return err("Failed to convert root: " & error)
+  defer:
+    ffi_cfr_free(rootFr)
+
+  let extNullFr = bytesToCfrLe(externalNullifier).valueOr:
+    return err("Failed to convert external nullifier: " & error)
+  defer:
+    ffi_cfr_free(extNullFr)
+
+  let shareXFr = bytesToCfrLe(proof.shareX).valueOr:
+    return err("Failed to convert shareX: " & error)
+  defer:
+    ffi_cfr_free(shareXFr)
+
+  let shareYFr = bytesToCfrLe(proof.shareY).valueOr:
+    return err("Failed to convert shareY: " & error)
+  defer:
+    ffi_cfr_free(shareYFr)
+
+  let nullifierFr = bytesToCfrLe(proof.nullifier).valueOr:
+    return err("Failed to convert nullifier: " & error)
+  defer:
+    ffi_cfr_free(nullifierFr)
+
+  let proofRes = ffi_rln_proof_new(
+    addr groth16Vec, rootFr, extNullFr, shareXFr, shareYFr, nullifierFr
+  )
   if proofRes.ok.isNil:
-    return err(consumeError("Failed to deserialize proof for verification: ", proofRes.err))
+    return err(consumeError("Failed to build RLN proof for verification: ", proofRes.err))
   defer:
     ffi_rln_proof_free(proofRes.ok)
 
