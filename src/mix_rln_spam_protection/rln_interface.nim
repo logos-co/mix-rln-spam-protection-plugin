@@ -15,7 +15,7 @@ import results, chronicles
 import ./types
 import ./constants
 
-{.push raises: [].}
+{.push raises: [], gcsafe.}
 
 logScope:
   topics = "rln interface"
@@ -103,7 +103,7 @@ const
 
 proc computeExternalNullifier*(
     epoch: Epoch, rlnIdentifier: RlnIdentifier
-): RlnResult[ExternalNullifier] {.gcsafe.}
+): RlnResult[ExternalNullifier]
 
 proc ffi_cfr_free(cfr: ptr CFr) {.importc: "ffi_cfr_free", cdecl.}
 proc ffi_cfr_to_bytes_le(cfr: ptr CFr): Vec_uint8 {.importc: "ffi_cfr_to_bytes_le", cdecl.}
@@ -133,6 +133,7 @@ proc ffi_rln_new_with_params(
   graph_data: ptr Vec_uint8,
   config: cstring,
 ): CResultRLNPtrVecU8 {.importc: "ffi_rln_new_with_params", cdecl.}
+proc ffi_rln_free(rln: ptr FFI_RLN) {.importc: "ffi_rln_free", cdecl.}
 
 proc ffi_rln_witness_input_new(
   identity_secret: ptr CFr,
@@ -166,11 +167,6 @@ proc ffi_finish_rln_proof(
   partial_proof: ptr ptr FFI_RLNPartialProof,
   witness: ptr ptr FFI_RLNWitnessInput,
 ): CResultProofPtrVecU8 {.importc: "ffi_finish_rln_proof", cdecl.}
-proc ffi_verify_rln_proof(
-  rln: ptr ptr FFI_RLN,
-  proof: ptr ptr FFI_RLNProof,
-  x: ptr CFr,
-): CBoolResult {.importc: "ffi_verify_rln_proof", cdecl.}
 proc ffi_verify_with_roots(
   rln: ptr ptr FFI_RLN,
   proof: ptr ptr FFI_RLNProof,
@@ -197,7 +193,6 @@ proc ffi_compute_id_secret(
 
 proc ffi_rln_proof_get_values(proof: ptr ptr FFI_RLNProof): ptr FFI_RLNProofValues {.importc: "ffi_rln_proof_get_values", cdecl.}
 proc ffi_rln_proof_to_bytes_le(proof: ptr ptr FFI_RLNProof): CResultVecU8VecU8 {.importc: "ffi_rln_proof_to_bytes_le", cdecl.}
-proc ffi_bytes_le_to_rln_proof(bytes: ptr Vec_uint8): CResultProofPtrVecU8 {.importc: "ffi_bytes_le_to_rln_proof", cdecl.}
 # v2.0.2: construct an RLNProof directly from its field elements (single
 # message-id variant), avoiding the manual 290-byte wire layout.
 proc ffi_rln_proof_new(
@@ -417,15 +412,20 @@ proc getMerkleProofRaw(
     return err(consumeError("Failed to get Merkle proof: ", res.err))
   ok(res.ok)
 
-proc buildWitness(
-    merkleProof: ptr FFI_MerkleProof,
+proc buildWitnessFromPath(
+    pathElements: ptr Vec_CFr,
+    pathIndex: ptr Vec_uint8,
     credential: IdentityCredential,
     epoch: Epoch,
     rlnIdentifier: RlnIdentifier,
     signal: openArray[byte],
     messageId: uint,
     userMessageLimit: uint64,
-): RlnResult[ptr FFI_RLNWitnessInput] {.gcsafe.} =
+    errPrefix: string,
+): RlnResult[ptr FFI_RLNWitnessInput] =
+  ## Build a witness from a caller-prepared Merkle path. Both overloads of
+  ## `buildWitness` funnel through here once their path inputs are in the
+  ## FFI-shaped Vec form.
   let identitySecret = bytesToCfrLe(credential.idSecretHash).valueOr:
     return err(error)
   defer:
@@ -458,16 +458,39 @@ proc buildWitness(
     identitySecret,
     userLimit,
     messageIdFr,
-    addr merkleProof[].path_elements,
-    addr merkleProof[].path_index,
+    pathElements,
+    pathIndex,
     x,
     externalNullifier,
   )
 
   if witnessRes.ok.isNil:
-    return err(consumeError("Failed to create witness: ", witnessRes.err))
+    return err(consumeError(errPrefix, witnessRes.err))
 
   ok(witnessRes.ok)
+
+proc buildWitness(
+    merkleProof: ptr FFI_MerkleProof,
+    credential: IdentityCredential,
+    epoch: Epoch,
+    rlnIdentifier: RlnIdentifier,
+    signal: openArray[byte],
+    messageId: uint,
+    userMessageLimit: uint64,
+): RlnResult[ptr FFI_RLNWitnessInput] =
+  ## Fast path: pass zerokit's owned `Vec_CFr` straight through; no
+  ## per-element bytes round-trip.
+  buildWitnessFromPath(
+    addr merkleProof[].path_elements,
+    addr merkleProof[].path_index,
+    credential,
+    epoch,
+    rlnIdentifier,
+    signal,
+    messageId,
+    userMessageLimit,
+    "Failed to create witness: ",
+  )
 
 proc buildWitness(
     pathElements: openArray[byte],
@@ -478,7 +501,10 @@ proc buildWitness(
     signal: openArray[byte],
     messageId: uint,
     userMessageLimit: uint64,
-): RlnResult[ptr FFI_RLNWitnessInput] {.gcsafe.} =
+): RlnResult[ptr FFI_RLNWitnessInput] =
+  ## Cached-cache path: reconstruct a `Vec_CFr` from the cached bytes so the
+  ## partial-proof reuse flow can rebuild the witness without holding a live
+  ## `FFI_MerkleProof` across calls.
   if pathElements.len != pathIndex.len * FieldElementSize:
     return err(
       "Invalid cached Merkle path: expected " &
@@ -498,48 +524,17 @@ proc buildWitness(
 
   var pathIndexVec = toVecUint8(pathIndex)
 
-  let identitySecret = bytesToCfrLe(credential.idSecretHash).valueOr:
-    return err(error)
-  defer:
-    ffi_cfr_free(identitySecret)
-
-  let userLimit = bytesToCfrLe(uint64ToField(userMessageLimit)).valueOr:
-    return err(error)
-  defer:
-    ffi_cfr_free(userLimit)
-
-  let messageIdFr = bytesToCfrLe(uint64ToField(uint64(messageId))).valueOr:
-    return err(error)
-  defer:
-    ffi_cfr_free(messageIdFr)
-
-  let x = hashToFieldLe(signal).valueOr:
-    return err(error)
-  defer:
-    ffi_cfr_free(x)
-
-  let externalNullifierBytes = computeExternalNullifier(epoch, rlnIdentifier).valueOr:
-    return err("Failed to compute external nullifier: " & error)
-
-  let externalNullifier = bytesToCfrLe(externalNullifierBytes).valueOr:
-    return err(error)
-  defer:
-    ffi_cfr_free(externalNullifier)
-
-  let witnessRes = ffi_rln_witness_input_new(
-    identitySecret,
-    userLimit,
-    messageIdFr,
+  buildWitnessFromPath(
     addr pathElementsVec,
     addr pathIndexVec,
-    x,
-    externalNullifier,
+    credential,
+    epoch,
+    rlnIdentifier,
+    signal,
+    messageId,
+    userMessageLimit,
+    "Failed to create witness from cached Merkle path: ",
   )
-
-  if witnessRes.ok.isNil:
-    return err(consumeError("Failed to create witness from cached Merkle path: ", witnessRes.err))
-
-  ok(witnessRes.ok)
 
 proc parseCredentialVec(vec: var Vec_CFr): RlnResult[IdentityCredential] =
   ## ffi_extended_key_gen returns a Vec_CFr of exactly 4 elements:
@@ -629,6 +624,13 @@ proc createRLNInstance*(resourcesPath: string = ""): RlnResult[RLNInstance] =
 proc newRLNInstance*(resourcesPath: string = ""): RlnResult[RLNInstance] =
   createRLNInstance(resourcesPath)
 
+proc close*(instance: RLNInstance) =
+  ## Release the underlying zerokit FFI_RLN box. Idempotent: subsequent calls
+  ## are no-ops. After close, the instance must not be used.
+  if not instance.isNil and not instance.ctx.isNil:
+    ffi_rln_free(instance.ctx)
+    instance.ctx = nil
+
 proc poseidonHash*(inputs: seq[seq[byte]]): RlnResult[array[32, byte]] =
   case inputs.len
   of 1:
@@ -640,12 +642,12 @@ proc poseidonHash*(inputs: seq[seq[byte]]): RlnResult[array[32, byte]] =
 
 proc computeExternalNullifier*(
     epoch: Epoch, rlnIdentifier: RlnIdentifier
-): RlnResult[ExternalNullifier] {.gcsafe.} =
+): RlnResult[ExternalNullifier] =
   poseidonPairLe(epoch, rlnIdentifier)
 
 proc computeRateCommitment*(
     idCommitment: IDCommitment, userMessageLimit: uint64
-): RlnResult[IDCommitment] {.gcsafe.} =
+): RlnResult[IDCommitment] =
   let limitField = uint64ToField(userMessageLimit)
   poseidonPairLe(idCommitment, limitField)
 
@@ -741,7 +743,7 @@ proc generatePartialProofCache*(
     credential: IdentityCredential,
     memberIndex: MembershipIndex,
     userMessageLimit: uint64 = UserMessageLimit,
-): RlnResult[PartialProofCache] {.gcsafe.} =
+): RlnResult[PartialProofCache] =
   discard flush(instance.ctx)
 
   let merkleProof = instance.getMerkleProofRaw(memberIndex).valueOr:
@@ -809,7 +811,7 @@ proc generateRlnProofWithWitness*(
     signal: openArray[byte],
     messageId: uint = 0,
     userMessageLimit: uint64 = UserMessageLimit,
-): RlnResult[RateLimitProof] {.gcsafe.} =
+): RlnResult[RateLimitProof] =
   discard flush(instance.ctx)
 
   let merkleProof = instance.getMerkleProofRaw(memberIndex).valueOr:
@@ -850,7 +852,7 @@ proc finishRlnProofWithCache*(
     signal: openArray[byte],
     messageId: uint = 0,
     userMessageLimit: uint64 = UserMessageLimit,
-): RlnResult[RateLimitProof] {.gcsafe.} =
+): RlnResult[RateLimitProof] =
   let currentRoot = instance.getMerkleRoot().valueOr:
     return err("Failed to get current root: " & error)
 
@@ -897,11 +899,14 @@ proc verifyRlnProof*(
     proof: RateLimitProof,
     rlnIdentifier: RlnIdentifier,
     signal: openArray[byte],
-    validRoots: seq[MerkleNode] = @[],
-): RlnResult[bool] {.gcsafe.} =
+    validRoots: seq[MerkleNode],
+): RlnResult[bool] =
   # v2.0.2: build the FFI_RLNProof directly from its field elements via
   # ffi_rln_proof_new, instead of round-tripping through the 290-byte
   # wire layout.
+  if validRoots.len == 0:
+    return err("verifyRlnProof requires at least one valid root")
+
   let externalNullifier = computeExternalNullifier(proof.epoch, rlnIdentifier).valueOr:
     return err("Failed to compute external nullifier: " & error)
 
@@ -948,25 +953,19 @@ proc verifyRlnProof*(
   var ctx = instance.ctx
   var proofHandle = proofRes.ok
 
-  if validRoots.len > 0:
-    var roots = toRootVec(validRoots).valueOr:
-      return err("Failed to build root vector: " & error)
-    defer:
-      ffi_vec_cfr_free(roots)
+  var roots = toRootVec(validRoots).valueOr:
+    return err("Failed to build root vector: " & error)
+  defer:
+    ffi_vec_cfr_free(roots)
 
-    let verifyRes = ffi_verify_with_roots(addr ctx, addr proofHandle, addr roots, x)
-    if hasError(verifyRes.err):
-      return err(consumeError("Proof verification failed: ", verifyRes.err))
-    return ok(verifyRes.ok)
-
-  let verifyRes = ffi_verify_rln_proof(addr ctx, addr proofHandle, x)
+  let verifyRes = ffi_verify_with_roots(addr ctx, addr proofHandle, addr roots, x)
   if hasError(verifyRes.err):
     return err(consumeError("Proof verification failed: ", verifyRes.err))
   ok(verifyRes.ok)
 
 proc recoverSecret*(
     instance: RLNInstance, proof1: RateLimitProof, proof2: RateLimitProof
-): RlnResult[array[32, byte]] {.gcsafe.} =
+): RlnResult[array[32, byte]] =
   discard instance
   if proof1.nullifier != proof2.nullifier:
     return err("Cannot recover secret: proofs have different nullifiers")
