@@ -23,7 +23,7 @@ import ../src/mix_rln_spam_protection/constants
 import ../src/mix_rln_spam_protection/codec
 import ../src/mix_rln_spam_protection/nullifier_log
 import ../src/mix_rln_spam_protection/rln_interface
-import libp2p/protocols/mix/spam_protection as libp2p_spam
+import libp2p_mix/spam_protection as libp2p_spam
 
 # Use std/unittest (testutils/unittests available in logos-messaging-nim context)
 import std/unittest

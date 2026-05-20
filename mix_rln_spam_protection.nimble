@@ -15,8 +15,11 @@ requires "nimcrypto >= 0.6.0"
 requires "secp256k1 >= 0.5.0"
 requires "json_serialization >= 0.2.0"
 
-# nim-libp2p with cover traffic support (PR #2243 merged as e1bbda4f6)
+# nim-libp2p — used directly for protobuf/minprotobuf and varint
 requires "https://github.com/vacp2p/nim-libp2p.git#e1bbda4f6"
+
+# libp2p_mix — extracted into its own repo; previously libp2p/protocols/mix
+requires "https://github.com/logos-co/nim-libp2p-mix.git#f24cd25a54e2156d66b497f6d576aab3ccfc8fa6"
 
 # Tasks
 task test, "Run tests":
