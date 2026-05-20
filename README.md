@@ -22,7 +22,7 @@ This plugin provides:
 │    - verifyProof(proof, bindingData) → bool                     │
 │    - proofSize() → 301 bytes (protobuf-encoded)                 │
 ├─────────────────────────────────────────────────────────────────┤
-│  RLN Core (zerokit v2.0.0 FFI)                                  │
+│  RLN Core (zerokit v2.0.2 FFI)                                  │
 │    - Proof generation/verification (RLN-v2 format)              │
 │    - Partial-proof caching for faster steady-state sends         │
 │    - Merkle tree operations                                      │
@@ -48,18 +48,21 @@ This plugin provides:
 
 ### Zerokit Library (librln)
 
-This plugin requires the zerokit RLN library (v2.0.0) for proof generation and verification.
+This plugin requires the zerokit RLN library (v2.0.2) for proof generation and verification.
+
+The plugin keeps a local Merkle tree (offchain membership), so zerokit must be
+built with default features — do **not** enable the `stateless` cargo feature.
 
 ```bash
 # Option 1: Build from source
 git clone https://github.com/vacp2p/zerokit
 cd zerokit
-git checkout v2.0.0
+git checkout v2.0.2
 cargo build --release -p rln
 cp target/release/librln.a /path/to/your/project/
 
 # Option 2: Download prebuilt
-# https://github.com/vacp2p/zerokit/releases/tag/v2.0.0
+# https://github.com/vacp2p/zerokit/releases/tag/v2.0.2
 ```
 
 ## Installation
@@ -72,7 +75,7 @@ requires "mix_rln_spam_protection >= 0.1.0"
 
 ### Dependencies
 
-- [zerokit-rln](https://github.com/vacp2p/zerokit) v2.0.0 - RLN proving library (static linking)
+- [zerokit-rln](https://github.com/vacp2p/zerokit) v2.0.2 - RLN proving library (static linking, default features — no `stateless`)
 - nim >= 2.0.0
 - chronos, results, chronicles, nimcrypto
 
@@ -236,7 +239,7 @@ nim c -r --passL:/path/to/librln.a --passL:-lm tests/test_all.nim
 - [RLN Spam Protection for Mix Networks RFC](https://github.com/vacp2p/rfc-index/pull/252)
 - [nim-libp2p Spam Protection Interface](https://github.com/vacp2p/nim-libp2p/pull/2037)
 - [RLN Documentation](https://rate-limiting-nullifier.github.io/rln-docs/)
-- [Zerokit](https://github.com/vacp2p/zerokit) (v0.9.0)
+- [Zerokit](https://github.com/vacp2p/zerokit) (v2.0.2)
 - [logos-messaging-nim](https://github.com/logos-messaging/logos-messaging-nim)
 
 ## License
