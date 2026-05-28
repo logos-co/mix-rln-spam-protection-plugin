@@ -114,6 +114,10 @@ proc resetToRoot*(tracker: MerkleRootTracker, root: MerkleNode) =
   tracker.resetRoots()
   tracker.addRoot(root)
 
+proc hasRoots*(tracker: MerkleRootTracker): bool =
+  ## Check if the tracker has any valid roots.
+  tracker.rootSet.len > 0
+
 proc containsRoot*(tracker: MerkleRootTracker, root: MerkleNode): bool =
   ## Check if a root is in the valid window. O(1) lookup.
   root in tracker.rootSet
@@ -211,9 +215,14 @@ method withdraw*(
 {.push raises: [], gcsafe.}
 
 method isReady*(gm: GroupManager): bool {.base.} =
-  ## Check if the group manager is ready for proof operations.
+  ## Check if the group manager is ready for proof generation.
   gm.isInitialized and gm.isSynced and gm.credentials.isSome and
     gm.membershipIndex.isSome
+
+method isReadyForVerification*(gm: GroupManager): bool {.base.} =
+  ## Check if the group manager is ready for proof verification.
+  ## Default: same as isReady. OnchainLEZ overrides to be less strict.
+  gm.isReady()
 
 method validateRoot*(gm: GroupManager, root: MerkleNode): bool {.base.} =
   ## Check if a Merkle root is valid (in the acceptable window).

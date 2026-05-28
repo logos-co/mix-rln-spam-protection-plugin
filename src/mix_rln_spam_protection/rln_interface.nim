@@ -828,6 +828,43 @@ proc generateRlnProofWithWitness*(
 
   proofPtrToRateLimitProof(proofRes.ok, epoch)
 
+proc generateRlnProofWithExternalWitness*(
+    instance: RLNInstance,
+    pathElements: openArray[byte],
+    pathIndex: openArray[byte],
+    credential: IdentityCredential,
+    epoch: Epoch,
+    rlnIdentifier: RlnIdentifier,
+    signal: openArray[byte],
+    messageId: uint = 0,
+    userMessageLimit: uint64 = UserMessageLimit,
+): RlnResult[RateLimitProof] {.gcsafe.} =
+  ## Generate an RLN proof using an external Merkle witness (e.g. from LEZ).
+  ## Does NOT use the local tree — path elements and indices are provided directly.
+  let witness = buildWitness(
+    pathElements,
+    pathIndex,
+    credential,
+    epoch,
+    rlnIdentifier,
+    signal,
+    messageId,
+    userMessageLimit,
+  ).valueOr:
+    return err(error)
+  defer:
+    ffi_rln_witness_input_free(witness)
+
+  var ctx = instance.ctx
+  var witnessHandle = witness
+  let proofRes = ffi_generate_rln_proof(addr ctx, addr witnessHandle)
+  if proofRes.ok.isNil:
+    return err(consumeError("Failed to generate RLN proof with external witness: ", proofRes.err))
+  defer:
+    ffi_rln_proof_free(proofRes.ok)
+
+  proofPtrToRateLimitProof(proofRes.ok, epoch)
+
 proc finishRlnProofWithCache*(
     instance: RLNInstance,
     cache: PartialProofCache,
