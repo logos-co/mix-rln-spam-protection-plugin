@@ -178,45 +178,38 @@ proc membershipConfirmedAt*(gm: OnchainLEZGroupManager): Option[Moment] =
 
 proc pollLoop(gm: OnchainLEZGroupManager) {.async.} =
   while gm.isSynced:
-    # Fetch roots from LEZ
-    try:
-      let rootsResult = await gm.fetchRoots()
-      if rootsResult.isOk:
-        let roots = rootsResult.get()
-        for root in roots:
-          gm.rootTracker.addRoot(root)
-        if roots.len > 0:
-          debug "Polled valid roots from LEZ",
-            count = roots.len, firstRoot = roots[0].toHex()
-      else:
-        debug "Failed to fetch roots from LEZ", error = rootsResult.error
-    except CatchableError as e:
-      debug "Exception fetching roots", error = e.msg
+    let rootsResult = await gm.fetchRoots()
+    if rootsResult.isOk:
+      let roots = rootsResult.get()
+      for root in roots:
+        gm.rootTracker.addRoot(root)
+      if roots.len > 0:
+        debug "Polled valid roots from LEZ",
+          count = roots.len, firstRoot = roots[0].toHex()
+    else:
+      debug "Failed to fetch roots from LEZ", error = rootsResult.error
 
     # Refresh rootTracker from validRoots returned atomically with the proof,
     # so we don't carry a roots window that races against a registration tx
     # and drops the root encoded in the proof.
     if gm.membershipIndex.isSome:
-      try:
-        let proofResult = await gm.fetchProof(gm.membershipIndex.get())
-        if proofResult.isOk:
-          let p = proofResult.get()
-          gm.cachedProof = some(p)
-          gm.rootTracker.resetRoots()
-          for r in p.validRoots:
-            gm.rootTracker.addRoot(r)
-          if not gm.rootTracker.containsRoot(p.root):
-            # Defensive: same on-chain read should already include `root`,
-            # but add it so self-verify accepts proofs we just generated.
-            gm.rootTracker.addRoot(p.root)
-            debug "Proof root missing from unified validRoots; added",
-              proofRoot = p.root.toHex()
-          trace "Cached merkle proof from LEZ",
-            pathElementsLen = p.pathElements.len,
-            unifiedRootsCount = p.validRoots.len
-        else:
-          debug "Failed to fetch merkle proof from LEZ", error = proofResult.error
-      except CatchableError as e:
-        debug "Exception fetching proof", error = e.msg
+      let proofResult = await gm.fetchProof(gm.membershipIndex.get())
+      if proofResult.isOk:
+        let p = proofResult.get()
+        gm.cachedProof = some(p)
+        gm.rootTracker.resetRoots()
+        for r in p.validRoots:
+          gm.rootTracker.addRoot(r)
+        if not gm.rootTracker.containsRoot(p.root):
+          # Defensive: same on-chain read should already include `root`,
+          # but add it so self-verify accepts proofs we just generated.
+          gm.rootTracker.addRoot(p.root)
+          debug "Proof root missing from unified validRoots; added",
+            proofRoot = p.root.toHex()
+        trace "Cached merkle proof from LEZ",
+          pathElementsLen = p.pathElements.len,
+          unifiedRootsCount = p.validRoots.len
+      else:
+        debug "Failed to fetch merkle proof from LEZ", error = proofResult.error
 
     await sleepAsync(gm.pollInterval)
