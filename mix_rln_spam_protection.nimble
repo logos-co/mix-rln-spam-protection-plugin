@@ -15,8 +15,12 @@ requires "nimcrypto >= 0.6.0"
 requires "secp256k1 >= 0.5.0"
 requires "json_serialization >= 0.2.0"
 
-# nim-libp2p — used directly for protobuf/minprotobuf and varint
-requires "https://github.com/vacp2p/nim-libp2p.git#e1bbda4f6"
+# nim-libp2p — used directly for protobuf/minprotobuf and varint.
+# Pinned to the same commit nim-libp2p-mix uses so the diamond dep
+# resolves to a single libp2p source.  d4cd68b91b is 14 commits past
+# b16873f07 (the boringssl URL+range fix that lets nimble vnext SAT
+# solve without --solver:legacy).
+requires "https://github.com/vacp2p/nim-libp2p.git#d4cd68b91b82f34a0ede3766ab1ca8119d5015f8"
 
 # libp2p_mix — extracted into its own repo; previously libp2p/protocols/mix
 requires "https://github.com/logos-co/nim-libp2p-mix.git#f24cd25a54e2156d66b497f6d576aab3ccfc8fa6"
