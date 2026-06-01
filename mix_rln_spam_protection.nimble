@@ -22,8 +22,12 @@ requires "json_serialization >= 0.2.0"
 # solve without --solver:legacy).
 requires "https://github.com/vacp2p/nim-libp2p.git#d4cd68b91b82f34a0ede3766ab1ca8119d5015f8"
 
-# libp2p_mix — extracted into its own repo; previously libp2p/protocols/mix
-requires "https://github.com/logos-co/nim-libp2p-mix.git#f24cd25a54e2156d66b497f6d576aab3ccfc8fa6"
+# libp2p_mix — extracted into its own repo; previously libp2p/protocols/mix.
+# Pinned to chore/bump-libp2p-master tip (99d2ca0): nim-libp2p-mix#f24cd25a
+# itself pins libp2p#7e72c0d6 (boringssl URL+tag form, triggers nimble vnext
+# SAT bug); 99d2ca0 carries the libp2p bump to d4cd68b91b (URL+range form).
+# Includes PR #10's migrate-to-Rng-type API change.
+requires "https://github.com/logos-co/nim-libp2p-mix.git#99d2ca0703e117b80ce085cfa45269969d252228"
 
 # Tasks
 task test, "Run tests":
