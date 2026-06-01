@@ -22,11 +22,14 @@ This plugin provides:
 │    - verifyProof(proof, bindingData) → bool                     │
 │    - proofSize() → 301 bytes (protobuf-encoded)                 │
 ├─────────────────────────────────────────────────────────────────┤
-│  RLN Core (zerokit v2.0.2 FFI)                                  │
+│  RLN Core (zerokit v2.0.2 FFI, --features stateless)            │
 │    - Proof generation/verification (RLN-v2 format)              │
 │    - Partial-proof caching for faster steady-state sends         │
-│    - Merkle tree operations                                      │
 │    - Poseidon hash, secret recovery                              │
+├─────────────────────────────────────────────────────────────────┤
+│  IncrementalMerkleTree (pure Nim, src/.../merkle_tree.nim)      │
+│    - depth-20 Poseidon Merkle tree, byte-parity with pmtree     │
+│    - set/get/delete leaves, root, inclusion proofs               │
 ├─────────────────────────────────────────────────────────────────┤
 │  OffchainGroupManager                                            │
 │    - Membership tree (depth 20, ~1M members)                     │
@@ -48,21 +51,23 @@ This plugin provides:
 
 ### Zerokit Library (librln)
 
-This plugin requires the zerokit RLN library (v2.0.2) for proof generation and verification.
+This plugin requires the zerokit RLN library (v2.0.2) for Poseidon hashing,
+witness construction, and Groth16 prove/verify.
 
-The plugin keeps a local Merkle tree (offchain membership), so zerokit must be
-built with default features — do **not** enable the `stateless` cargo feature.
+The Merkle tree of memberships lives on the **Nim side** (see
+`src/mix_rln_spam_protection/merkle_tree.nim`), so the consuming application
+**must** build zerokit with `--features stateless` to avoid carrying a
+second zerokit archive alongside relay's.  The plugin will not link against
+a default-features (pmtree-ft) build — `ffi_set_next_leaf`, `ffi_get_root`,
+`ffi_get_merkle_proof`, etc. are no longer referenced.
 
 ```bash
-# Option 1: Build from source
+# Build from source
 git clone https://github.com/vacp2p/zerokit
 cd zerokit
 git checkout v2.0.2
-cargo build --release -p rln
+cargo build --release -p rln --no-default-features --features stateless
 cp target/release/librln.a /path/to/your/project/
-
-# Option 2: Download prebuilt
-# https://github.com/vacp2p/zerokit/releases/tag/v2.0.2
 ```
 
 ## Installation
@@ -75,7 +80,7 @@ requires "mix_rln_spam_protection >= 0.1.0"
 
 ### Dependencies
 
-- [zerokit-rln](https://github.com/vacp2p/zerokit) v2.0.2 - RLN proving library (static linking, default features — no `stateless`)
+- [zerokit-rln](https://github.com/vacp2p/zerokit) v2.0.2 - RLN proving library (static linking, **`--no-default-features --features stateless`**)
 - nim >= 2.0.0
 - chronos, results, chronicles, nimcrypto
 
