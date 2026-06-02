@@ -9,13 +9,11 @@
 ##
 ## Switching to the stateless build lets the plugin share a single zerokit
 ## archive with relay (which is also stateless), eliminating the dual-
-## archive symbol collision that was previously dodged by version-skew
-## (relay v0.9 bare names vs plugin v2.0 `ffi_*` prefix).
+## archive symbol collision that was previously dodged by version-skew.
 ##
 ## Build: the plugin's zerokit dependency MUST be built with
-## `--no-default-features --features stateless`.  Stateful tree FFIs
-## (`ffi_set_next_leaf`, `ffi_get_root`, `ffi_get_merkle_proof`, etc.)
-## are not present in stateless archives.
+## `--no-default-features --features stateless`.  Stateful tree FFIs are
+## not present in stateless archives.
 
 import std/os
 import results, chronicles
@@ -703,9 +701,8 @@ proc insertMemberAt*(
   ok()
 
 proc flush*(ctx: ptr RLN): bool =
-  ## No-op shim: the Nim IMT is always in-sync.  Kept so callers that took
-  ## a `ptr RLN` (group_manager pre-proof flush + post-load flush) continue
-  ## to compile without churn.
+  ## No-op: the Nim IMT is always in-sync; callers that took a `ptr RLN`
+  ## (group_manager pre-proof flush + post-load flush) keep the same signature.
   discard ctx
   true
 

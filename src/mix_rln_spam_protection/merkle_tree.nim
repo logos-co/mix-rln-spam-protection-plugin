@@ -68,7 +68,6 @@ proc init*(
 # --- Accessors -----------------------------------------------------------
 
 proc leavesSet*(t: IncrementalMerkleTree): uint64 =
-  ## Parity counter for zerokit `ffi_leaves_set`.
   t.nextIndexInternal
 
 proc capacity*(t: IncrementalMerkleTree): uint64 =
@@ -190,13 +189,5 @@ proc encodeProof*(
   copyMem(addr result[8 + depth * 32], unsafeAddr depthBytes[0], 8)
   if depth > 0:
     copyMem(addr result[8 + depth * 32 + 8], unsafeAddr pathIndex[0], depth)
-
-# --- Compatibility shim --------------------------------------------------
-
-proc flush*(t: var IncrementalMerkleTree): bool =
-  ## No-op: the Nim IMT is always in-sync.  Kept so callers that mirrored
-  ## the zerokit `ffi_flush` contract continue to compile.
-  discard t # silence "unused" since we don't actually need a var here
-  true
 
 {.pop.}

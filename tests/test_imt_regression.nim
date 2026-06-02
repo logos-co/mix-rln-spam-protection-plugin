@@ -2,21 +2,19 @@
 # Copyright (c) 2025 vacp2p
 # Licensed under either of Apache License 2.0 or MIT license.
 
-## Strict byte-parity test for the Nim Incremental Merkle Tree against the
-## golden fixture captured from zerokit pmtree.
+## Regression test for the Nim `IncrementalMerkleTree`.
 ##
-## The fixture (`tests/fixtures/pmtree_golden.json`) was produced by running
-## `tests/capture_golden.nim` while the plugin was built against zerokit's
-## default features (pmtree-ft) — see that file's header for the capture
-## sequence.  This test replays the same op sequence through the pure-Nim
-## `IncrementalMerkleTree` and asserts byte-identical roots, proofs, leaf
-## readbacks, and `insertMember`-returned indices at every step.
+## Replays the deterministic op sequence in `tests/fixtures/imt_regression.json`
+## through the IMT and asserts byte-identical roots, proofs, leaf readbacks,
+## and `insertLeaf`-returned indices at every step.  The fixture is generated
+## by `tests/tools/regenerate_imt_fixture.nim`; regenerate it only after a
+## deliberate IMT change.
 ##
 ## Build/run:
-##   nim c -r --passL:<librln-with-poseidon>.a --passL:-lm tests/test_merkle_tree.nim
+##   nim c -r --passL:<librln>.a --passL:-lm tests/test_imt_regression.nim
 ##
-## The librln archive only needs `ffi_poseidon_hash_pair` (and its cfr
-## helpers); a stateless-feature build is sufficient.
+## librln is required for Poseidon (`poseidonPairLe`); the stateless
+## librln archive is sufficient.
 
 import std/[json, strformat, strutils]
 import results
@@ -27,7 +25,7 @@ import ../src/mix_rln_spam_protection/rln_interface
 import ../src/mix_rln_spam_protection/types
 import ../src/mix_rln_spam_protection/constants
 
-const FixturePath = "tests/fixtures/pmtree_golden.json"
+const FixturePath = "tests/fixtures/imt_regression.json"
 
 proc hexToBytes(hex: string): seq[byte] =
   doAssert hex.len mod 2 == 0, "odd hex length: " & $hex.len
@@ -42,17 +40,12 @@ proc toMerkleNode(hex: string): MerkleNode =
     result[i] = bytes[i]
 
 proc poseidonHash(a, b: MerkleNode): MerkleNode {.gcsafe, raises: [].} =
-  ## Adapter from the IMT callback signature to the plugin's existing
-  ## `poseidonPairLe` (which calls `ffi_poseidon_hash_pair`).  Treats a
-  ## propagation failure as a contract violation — the inputs we feed are
-  ## always either ZERO_FIELD or previous Poseidon outputs, so a failure
-  ## would indicate FFI corruption.
   let r = poseidonPairLe(a, b)
   if r.isErr:
     raiseAssert "poseidonPairLe failed: " & r.error
   r.get()
 
-suite "Merkle tree: strict parity with pmtree fixture":
+suite "IMT regression: byte-identical replay of fixture":
   test "replay fixture, assert byte-identical output at every step":
     let fixtureText = readFile(FixturePath)
     let fixture = parseJson(fixtureText)
@@ -122,7 +115,6 @@ suite "Merkle tree: strict parity with pmtree fixture":
 
   test "additional: idempotent reads (getRoot/getInclusionProof/getLeaf)":
     var t = IncrementalMerkleTree.init(MerkleTreeDepth, poseidonHash)
-    # Populate a few leaves.
     for i in 0 ..< 5:
       var leaf: MerkleNode
       leaf[0] = byte(0x42)
@@ -176,7 +168,6 @@ suite "Merkle tree: strict parity with pmtree fixture":
     l[0] = 0xb0
     check t.setLeaf(15, l).isOk
     check t.leavesSet() == 16
-    # A subsequent insertLeaf lands at 16, not at the prior counter.
     var l2: MerkleNode
     l2[0] = 0xc0
     let r = t.insertLeaf(l2)
@@ -190,16 +181,13 @@ suite "Merkle tree: strict parity with pmtree fixture":
     check t.setLeaf(t.capacity() + 100, l).isErr
 
   test "additional: proof at unmaterialised idx uses zero-subtree siblings":
-    # Insert one leaf at idx=0, then ask for proof at idx=100.  All siblings
-    # along that path should be empty-subtree defaults at their level.
     var t = IncrementalMerkleTree.init(MerkleTreeDepth, poseidonHash)
     var l: MerkleNode
     l[0] = 0x77
     check t.insertLeaf(l).isOk
     let proofRes = t.getInclusionProof(100)
     check proofRes.isOk
-    # Don't assert exact bytes here — the strict-parity test above already
-    # locks down the wire format.  Just sanity-check shape.
+    # Shape-only — the strict-replay test above already locks the wire format.
     let (pe, pi) = proofRes.get()
     check pe.len == MerkleTreeDepth * 32
     check pi.len == MerkleTreeDepth
