@@ -23,10 +23,13 @@ requires "json_serialization >= 0.2.0"
 requires "https://github.com/vacp2p/nim-libp2p.git#c43199378f46d0aaf61be1cad1ee1d63e8f665d6"
 
 # libp2p_mix — extracted into its own repo; previously libp2p/protocols/mix.
-# Tip of chore/bump-libp2p-v2.0.0 (sink overrides on the three mix Connection
-# subclasses + AddressConfidence.Infinite on pool entries, to align with
-# libp2p v2.0.0's LPStream.write signature and AddressBook auto-prune).
-requires "https://github.com/logos-co/nim-libp2p-mix.git#a32af1a4b89d343c22df74699818de2cb12b8138"
+# Tip of experiment/drop-nimble-lock (currently PR #14, stacked on top of
+# chore/bump-libp2p-v2.0.0). Carries the v2.0.0 bump + sink overrides +
+# AddressConfidence.Infinite + the deeper move-semantics propagation +
+# the lockfile-as-build-artefact cleanup. Pinned to the PR HEAD until the
+# stack lands on master; waku.nimble pins the same SHA to keep the diamond
+# dep collapsed to one libp2p_mix source.
+requires "https://github.com/logos-co/nim-libp2p-mix.git#50c4ab43904baa3f0a2bf81bba60dde2960d75a2"
 
 # Tasks
 task test, "Run tests":
