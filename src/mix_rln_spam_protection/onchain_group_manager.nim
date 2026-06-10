@@ -178,20 +178,29 @@ proc membershipConfirmedAt*(gm: OnchainLEZGroupManager): Option[Moment] =
 
 proc pollLoop(gm: OnchainLEZGroupManager) {.async.} =
   while gm.isSynced:
+    # Fetch the most recent valid roots from LEZ. When this node has a
+    # membership we don't apply them yet — (cachedProof, validRoots) must
+    # come from a single atomic LEZ read below, otherwise the tracker races
+    # ahead of cachedProof and self-verify rejects our just-generated proof
+    # with "Expected one of the provided roots" (the testnet flake).
     let rootsResult = await gm.fetchRoots()
     if rootsResult.isOk:
       let roots = rootsResult.get()
-      for root in roots:
-        gm.rootTracker.addRoot(root)
+      if gm.membershipIndex.isNone:
+        for root in roots:
+          gm.rootTracker.addRoot(root)
       if roots.len > 0:
         debug "Polled valid roots from LEZ",
-          count = roots.len, firstRoot = roots[0].toHex()
+          count = roots.len,
+          firstRoot = roots[0].toHex(),
+          appliedToTracker = gm.membershipIndex.isNone
     else:
       debug "Failed to fetch roots from LEZ", error = rootsResult.error
 
-    # Refresh rootTracker from validRoots returned atomically with the proof,
-    # so we don't carry a roots window that races against a registration tx
-    # and drops the root encoded in the proof.
+    # For nodes WITH a membership: refresh (cachedProof, rootTracker) from
+    # the same LEZ read so the proof root is guaranteed to be in the
+    # validRoots window. On fetchProof failure, leave both at their previous
+    # (consistent) values rather than rolling the tracker forward alone.
     if gm.membershipIndex.isSome:
       let proofResult = await gm.fetchProof(gm.membershipIndex.get())
       if proofResult.isOk:

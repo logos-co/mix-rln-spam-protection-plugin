@@ -439,7 +439,7 @@ method generateProof*(
       epoch: epochU64, messageId: msgId.uint64, merkleRoot: proof.merkleRoot
     ).encode()
 
-  debug "Generated RLN proof successfully", epoch = epochU64, messageId = msgId
+  info "Generated RLN proof successfully", epoch = epochU64, messageId = msgId
 
   ok(libp2p_spam.ProofResult(proof: serialized, token: token))
 
@@ -672,7 +672,7 @@ method verifyProof*(
     let data = broadcast.toBytes()
     asyncSpawn sp.publishCallback.get()(sp.config.proofMetadataContentTopic, data)
 
-  debug "Proof verified successfully",
+  info "Proof verified successfully",
     epoch = epochToUint64(proof.epoch),
     nullifier = proof.nullifier[0 .. 7].toHex() & "..."
 
