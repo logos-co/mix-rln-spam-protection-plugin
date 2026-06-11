@@ -90,7 +90,9 @@ proc defaultConfig*(): MixRlnConfig =
     proofMetadataContentTopic: ProofMetadataContentTopic,
   )
 
-proc newMixRlnSpamProtection*(config: MixRlnConfig): RlnResult[MixRlnSpamProtection] =
+proc new*(
+    T: typedesc[MixRlnSpamProtection], config: MixRlnConfig
+): RlnResult[MixRlnSpamProtection] =
   ## Create a new MixRlnSpamProtection instance.
   ##
   ## The instance must be initialized with init() before use.

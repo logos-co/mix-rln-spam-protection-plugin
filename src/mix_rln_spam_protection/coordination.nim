@@ -133,7 +133,7 @@ var config = defaultConfig()
 # config.membershipContentTopic = "/my-app/rln/membership/v1"
 # config.proofMetadataContentTopic = "/my-app/rln/metadata/v1"
 
-let spamProtection = newMixRlnSpamProtection(config).get()
+let spamProtection = MixRlnSpamProtection.new(config).get()
 await spamProtection.init()
 
 # Create coordination layer

@@ -98,7 +98,7 @@ config.keystorePassword = "my-secure-password"
 # config.proofMetadataContentTopic = "/my-app/rln/metadata/v1"
 
 # Create plugin
-let plugin = newMixRlnSpamProtection(config).valueOr:
+let plugin = MixRlnSpamProtection.new(config).valueOr:
   echo "Failed to create plugin: ", error
   return
 

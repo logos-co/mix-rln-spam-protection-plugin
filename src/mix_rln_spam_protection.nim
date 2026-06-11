@@ -22,7 +22,7 @@
 ## config.keystorePassword = "my-password"
 ##
 ## # Create and initialize plugin
-## let plugin = newMixRlnSpamProtection(config).get()
+## let plugin = MixRlnSpamProtection.new(config).get()
 ## await plugin.init()
 ##
 ## # Set up logos-messaging integration
