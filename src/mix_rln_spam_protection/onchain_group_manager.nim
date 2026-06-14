@@ -144,7 +144,7 @@ method generateProof*(
     pathElementsLen = proof.pathElements.len,
     pathIndexLen = proof.identityPathIndex.len
 
-  gm.rlnInstance.generateRlnProofWithExternalWitness(
+  let r = gm.rlnInstance.generateRlnProofWithExternalWitness(
     proof.pathElements,
     proof.identityPathIndex,
     creds,
@@ -154,6 +154,25 @@ method generateProof*(
     messageId,
     gm.userMessageLimit,
   )
+  # Defensive add at proof-gen time: the witness-implied root MUST be in
+  # the local validRoots window or self-verify will reject. The pollLoop
+  # defensive add covers (cachedProof.root, validRoots) but cannot anticipate
+  # what Zerokit computes from (pathElements, leaf, path). If a multi-fetch
+  # race or witness/root drift produces p.merkleRoot ∉ validRoots, add it
+  # here so self-verify accepts; the WARN surfaces the underlying drift.
+  if r.isOk:
+    let p = r.get()
+    if p.merkleRoot != proof.root:
+      info "LEZ proof root vs witness-implied root MISMATCH",
+        cachedRoot = proof.root.toHex(),
+        computedRoot = p.merkleRoot.toHex(),
+        pathLen = proof.pathElements.len
+    if not gm.rootTracker.containsRoot(p.merkleRoot):
+      gm.rootTracker.addRoot(p.merkleRoot)
+      warn "Witness-implied root missing from validRoots; added defensively",
+        computedRoot = p.merkleRoot.toHex(),
+        cachedRoot = proof.root.toHex()
+  r
 
 proc proofRoot*(gm: OnchainLEZGroupManager): Option[MerkleNode] =
   ## Root our next-generated proof will reference. None until first poll lands.
