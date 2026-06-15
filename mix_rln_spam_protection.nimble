@@ -23,13 +23,12 @@ requires "json_serialization >= 0.2.0"
 requires "https://github.com/vacp2p/nim-libp2p.git#c43199378f46d0aaf61be1cad1ee1d63e8f665d6"
 
 # libp2p_mix — extracted into its own repo; previously libp2p/protocols/mix.
-# Tip of experiment/drop-nimble-lock (currently PR #14, stacked on top of
-# chore/bump-libp2p-v2.0.0). Carries the v2.0.0 bump + sink overrides +
-# AddressConfidence.Infinite + the deeper move-semantics propagation +
-# the lockfile-as-build-artefact cleanup. Pinned to the PR HEAD until the
-# stack lands on master; waku.nimble pins the same SHA to keep the diamond
+# Master tip. PR #12 squash-merged the PR #14 stack (v2.0.0 bump + sink
+# overrides + AddressConfidence.Infinite + deeper move-semantics
+# propagation + lockfile-as-build-artefact cleanup) and one nix/deps.nix
+# refresh sits on top. waku.nimble pins the same SHA to keep the diamond
 # dep collapsed to one libp2p_mix source.
-requires "https://github.com/logos-co/nim-libp2p-mix.git#50c4ab4fa788a33eb12a0a2cecaa708873352b58"
+requires "https://github.com/logos-co/nim-libp2p-mix.git#e314cdd50e0a837594400e40ba8291f198113464"
 
 # Tasks
 task test, "Run tests":
