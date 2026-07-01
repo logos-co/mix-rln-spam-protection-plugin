@@ -25,7 +25,8 @@ logScope:
 type
   # Subscription handler types
   MembershipSubscriptionHandler* = proc(update: MembershipUpdate) {.gcsafe, raises: [].}
-  MetadataSubscriptionHandler* = proc(metadata: ProofMetadataBroadcast) {.gcsafe, raises: [].}
+  MetadataSubscriptionHandler* =
+    proc(metadata: ProofMetadataBroadcast) {.gcsafe, raises: [].}
 
   # Coordination layer wrapper
   CoordinationLayer* = ref object
@@ -45,7 +46,7 @@ proc newCoordinationLayer*(spamProtection: MixRlnSpamProtection): CoordinationLa
     spamProtection: spamProtection,
     publishCallback: none(PublishCallback),
     onMembershipUpdate: none(MembershipSubscriptionHandler),
-    onProofMetadata: none(MetadataSubscriptionHandler)
+    onProofMetadata: none(MetadataSubscriptionHandler),
   )
 
 proc setPublishCallback*(cl: CoordinationLayer, callback: PublishCallback) =
@@ -54,18 +55,20 @@ proc setPublishCallback*(cl: CoordinationLayer, callback: PublishCallback) =
   cl.publishCallback = some(callback)
   cl.spamProtection.setPublishCallback(callback)
 
-proc setMembershipUpdateHandler*(cl: CoordinationLayer, handler: MembershipSubscriptionHandler) =
+proc setMembershipUpdateHandler*(
+    cl: CoordinationLayer, handler: MembershipSubscriptionHandler
+) =
   ## Set additional handler for membership updates (for custom processing).
   cl.onMembershipUpdate = some(handler)
 
-proc setProofMetadataHandler*(cl: CoordinationLayer, handler: MetadataSubscriptionHandler) =
+proc setProofMetadataHandler*(
+    cl: CoordinationLayer, handler: MetadataSubscriptionHandler
+) =
   ## Set additional handler for proof metadata (for custom processing).
   cl.onProofMetadata = some(handler)
 
 proc handleIncomingMessage*(
-  cl: CoordinationLayer,
-  contentTopic: string,
-  data: seq[byte]
+    cl: CoordinationLayer, contentTopic: string, data: seq[byte]
 ): Future[RlnResult[void]] {.async.} =
   ## Route incoming messages from logos-messaging to appropriate handlers.
   ##
@@ -85,7 +88,6 @@ proc handleIncomingMessage*(
       let update = MembershipUpdate.decode(data).valueOr:
         return err("Failed to decode update for handler: " & $error)
       cl.onMembershipUpdate.get()(update)
-
   elif contentTopic == metadataTopic:
     # Handle proof metadata
     let metadataResult = cl.spamProtection.handleProofMetadata(data)
@@ -97,7 +99,6 @@ proc handleIncomingMessage*(
       let metadata = ProofMetadataBroadcast.decode(data).valueOr:
         return err("Failed to decode metadata for handler: " & $error)
       cl.onProofMetadata.get()(metadata)
-
   else:
     return err("Unknown content topic: " & contentTopic)
 
@@ -112,12 +113,14 @@ proc getDefaultContentTopics*(): seq[string] =
   @[MembershipContentTopic, ProofMetadataContentTopic]
 
 # Helper function for building a logos-messaging subscription filter
-proc buildSubscriptionFilter*(cl: CoordinationLayer): seq[tuple[contentTopic: string, handler: string]] =
+proc buildSubscriptionFilter*(
+    cl: CoordinationLayer
+): seq[tuple[contentTopic: string, handler: string]] =
   ## Build a subscription filter for logos-messaging.
   ## Returns tuples of (contentTopic, handlerName) for documentation.
   @[
     (cl.spamProtection.getMembershipContentTopic(), "handleMembershipUpdate"),
-    (cl.spamProtection.getProofMetadataContentTopic(), "handleProofMetadata")
+    (cl.spamProtection.getProofMetadataContentTopic(), "handleProofMetadata"),
   ]
 
 # Integration example documentation
@@ -140,8 +143,11 @@ await spamProtection.init()
 let coordination = newCoordinationLayer(spamProtection)
 
 # Wire up publish callback to logos-messaging
-coordination.setPublishCallback(proc(topic: string, data: seq[byte]) {.async.} =
+coordination.setPublishCallback(proc(
+    topic: string, data: seq[byte]
+): Future[Result[void, string]] {.async.} =
   await logosMessaging.publish(topic, data)
+  ok()
 )
 
 # Subscribe to RLN topics (uses configured content topics)
@@ -167,20 +173,25 @@ let mixProto = MixProtocol.new(
 # Utility for creating a simple publish callback that logs (for testing)
 proc createLoggingPublishCallback*(): PublishCallback =
   ## Create a publish callback that just logs messages (for testing).
-  proc callback(contentTopic: string, data: seq[byte]): Future[void] {.async, gcsafe.} =
+  proc callback(
+      contentTopic: string, data: seq[byte]
+  ): Future[Result[void, string]] {.async, gcsafe.} =
     debug "Would publish to coordination layer",
-      topic = contentTopic,
-      dataLen = data.len
+      topic = contentTopic, dataLen = data.len
+    ok()
+
   return callback
 
 # Utility for printing membership update in human-readable form
 proc formatMembershipUpdate*(update: MembershipUpdate): string =
   ## Format a membership update for logging/display.
-  let actionStr = case update.action
+  let actionStr =
+    case update.action
     of MembershipAction.Add: "ADD"
     of MembershipAction.Remove: "REMOVE"
 
-  result = actionStr & " member at index " & $update.index &
-           " (idCommitment: " & update.idCommitment[0..7].toHex() & "...)"
+  result =
+    actionStr & " member at index " & $update.index & " (idCommitment: " &
+    update.idCommitment[0 .. 7].toHex() & "...)"
 
 # Note: toHex is imported from types module via spam_protection

@@ -68,12 +68,14 @@ type
     ## Group manager that propagates membership via logos-messaging content topics.
     ## Membership additions and deletions are broadcast to all nodes.
     publishCallback: Option[PublishCallback]
-    membershipByIdCommitment: Table[IDCommitment, MembershipIndex] ## idCommitment -> index (for spam recovery)
+    membershipByIdCommitment: Table[IDCommitment, MembershipIndex]
+      ## idCommitment -> index (for spam recovery)
     membershipByIndex: Table[MembershipIndex, IDCommitment] ## index -> idCommitment
     # We track per-user rate limits because the Merkle tree stores rateCommitment = Poseidon(idCommitment, userMessageLimit),
     # not the raw userMessageLimit. When serializing tree snapshots, we need the original userMessageLimit to correctly
     # recompute rateCommitment on load. Without this, we'd have to assume all members use the same limit.
-    rateLimitByIdCommitment: Table[IDCommitment, uint64] ## idCommitment -> userMessageLimit
+    rateLimitByIdCommitment: Table[IDCommitment, uint64]
+      ## idCommitment -> userMessageLimit
     nextIndex: MembershipIndex
     membershipContentTopic*: string ## Content topic for membership updates
 
@@ -161,9 +163,7 @@ proc refreshProofCache*(gm: OffchainGroupManager): RlnResult[void] =
     return ok()
 
   let cache = gm.rlnInstance.generatePartialProofCache(
-    gm.credentials.get(),
-    gm.membershipIndex.get(),
-    gm.userMessageLimit,
+    gm.credentials.get(), gm.membershipIndex.get(), gm.userMessageLimit
   ).valueOr:
     gm.partialProofCache = none(PartialProofCache)
     return err("Failed to refresh partial proof cache: " & error)
@@ -234,8 +234,7 @@ method generateProof*(
   let index = gm.membershipIndex.get()
 
   trace "Generating proof with credentials",
-    membershipIndex = index,
-    commitment = creds.idCommitment.toHex()
+    membershipIndex = index, commitment = creds.idCommitment.toHex()
 
   # Flush tree to ensure internal state is synced
   if not flush(gm.rlnInstance.ctx):
@@ -252,8 +251,7 @@ method generateProof*(
     return err("Failed to compute expected rate commitment: " & error)
 
   trace "Tree state verification before proof generation",
-    membershipIndex = index,
-    commitmentsMatch = treeCommitment == expectedRateCommitment
+    membershipIndex = index, commitmentsMatch = treeCommitment == expectedRateCommitment
 
   if treeCommitment != expectedRateCommitment:
     error "CRITICAL: Tree commitment at index does not match our credentials!",
@@ -270,9 +268,7 @@ method generateProof*(
     return err("Failed to get current Merkle root: " & error)
 
   trace "Generating RLN proof",
-    signalLen = signal.len,
-    messageId = messageId,
-    membershipIndex = index
+    signalLen = signal.len, messageId = messageId, membershipIndex = index
 
   # Happy path: cached partial-proof should be available and valid most of the time.
   # On cache miss/staleness, rebuild once and retry. Fall back to full proof generation.
@@ -309,7 +305,8 @@ method generateProof*(
       )
       usedPartialCache = proofResult.isOk
       if proofResult.isErr:
-        warn "Refreshed partial proof cache could not be used", error = proofResult.error
+        warn "Refreshed partial proof cache could not be used",
+          error = proofResult.error
 
   if not usedPartialCache:
     proofResult = gm.rlnInstance.generateRlnProofWithWitness(
@@ -429,11 +426,7 @@ proc restoreMemberFromKeystore*(
   if not gm.isInitialized:
     return err("Group manager not initialized")
 
-  let memberLimit =
-    if userMessageLimit > 0:
-      userMessageLimit
-    else:
-      gm.userMessageLimit
+  let memberLimit = if userMessageLimit > 0: userMessageLimit else: gm.userMessageLimit
 
   # Compute rate commitment = Poseidon(idCommitment, userMessageLimit)
   # This is the actual leaf value stored in the RLN Merkle tree
@@ -512,7 +505,8 @@ method register*(
       index: index,
     )
     let data = update.toBytes()
-    await gm.publishCallback.get()(gm.membershipContentTopic, data)
+    (await gm.publishCallback.get()(gm.membershipContentTopic, data)).isOkOr:
+      warn "Failed to broadcast membership update", error = error
 
   # Call callback
   if gm.onRegister.isSome:
@@ -538,7 +532,8 @@ proc registerWithLimit*(
     return err("Failed to compute rate commitment: " & error)
 
   let index = gm.nextIndex
-  trace "Registering member with custom limit", index = index, userMessageLimit = userMessageLimit
+  trace "Registering member with custom limit",
+    index = index, userMessageLimit = userMessageLimit
   gm.nextIndex += 1
 
   # Insert rateCommitment into RLN tree
@@ -564,13 +559,15 @@ proc registerWithLimit*(
       index: index,
     )
     let data = update.toBytes()
-    await gm.publishCallback.get()(gm.membershipContentTopic, data)
+    (await gm.publishCallback.get()(gm.membershipContentTopic, data)).isOkOr:
+      warn "Failed to broadcast membership update", error = error
 
   # Call callback
   if gm.onRegister.isSome:
     await gm.onRegister.get()(commitment, index)
 
-  debug "Member registered with custom limit", index = index, userMessageLimit = userMessageLimit
+  debug "Member registered with custom limit",
+    index = index, userMessageLimit = userMessageLimit
   ok(index)
 
 method register*(
@@ -613,9 +610,8 @@ method withdraw*(
     return err("Failed to delete member: " & deleteResult.error)
 
   # Get the member's rate limit before deleting (for broadcast)
-  let memberRateLimit = gm.rateLimitByIdCommitment.getOrDefault(
-    idCommitment, gm.userMessageLimit
-  )
+  let memberRateLimit =
+    gm.rateLimitByIdCommitment.getOrDefault(idCommitment, gm.userMessageLimit)
 
   # Update local tracking
   gm.membershipByIdCommitment.del(idCommitment)
@@ -635,7 +631,8 @@ method withdraw*(
       index: index,
     )
     let data = update.toBytes()
-    await gm.publishCallback.get()(gm.membershipContentTopic, data)
+    (await gm.publishCallback.get()(gm.membershipContentTopic, data)).isOkOr:
+      warn "Failed to broadcast membership update", error = error
 
   # Call callback
   if gm.onWithdraw.isSome:
@@ -789,8 +786,8 @@ proc getMemberRateLimit*(
 # └─────────────────────────────────────────────────────────────┘
 
 const
-  SnapshotHeaderSize = 16        # member_count (8) + next_index (8)
-  SnapshotMemberSize = 48        # commitment (32) + index (8) + userMessageLimit (8)
+  SnapshotHeaderSize = 16 # member_count (8) + next_index (8)
+  SnapshotMemberSize = 48 # commitment (32) + index (8) + userMessageLimit (8)
 
 # Note: writeUint64LE and readUint64LE are imported from bytes_utils via types
 
@@ -821,9 +818,8 @@ proc serializeTreeSnapshot*(gm: OffchainGroupManager): seq[byte] =
     offset += Uint64ByteSize
 
     # Write userMessageLimit
-    let rateLimit = gm.rateLimitByIdCommitment.getOrDefault(
-      commitment, gm.userMessageLimit
-    )
+    let rateLimit =
+      gm.rateLimitByIdCommitment.getOrDefault(commitment, gm.userMessageLimit)
     result.writeUint64LE(offset, rateLimit)
     offset += Uint64ByteSize
 
@@ -849,7 +845,10 @@ proc loadTreeSnapshot*(gm: OffchainGroupManager, data: seq[byte]): RlnResult[voi
   if data.len != expectedSize:
     error "Snapshot size mismatch",
       actual = data.len, expected = expectedSize, memberCount = memberCount
-    return err("Invalid snapshot: size mismatch (expected " & $expectedSize & ", got " & $data.len & ")")
+    return err(
+      "Invalid snapshot: size mismatch (expected " & $expectedSize & ", got " & $data.len &
+        ")"
+    )
 
   trace "Loading tree snapshot", memberCount = memberCount, nextIndex = nextIndex
 
@@ -883,7 +882,8 @@ proc loadTreeSnapshot*(gm: OffchainGroupManager, data: seq[byte]): RlnResult[voi
     # Insert into RLN Merkle tree
     let insertResult = gm.rlnInstance.insertMemberAt(index, rateCommitment)
     if insertResult.isErr:
-      error "Failed to insert member from snapshot", index = index, error = insertResult.error
+      error "Failed to insert member from snapshot",
+        index = index, error = insertResult.error
       return err("Failed to insert member: " & insertResult.error)
 
     # Update tracking tables - track by idCommitment for spam recovery
@@ -897,7 +897,8 @@ proc loadTreeSnapshot*(gm: OffchainGroupManager, data: seq[byte]): RlnResult[voi
   gm.resetRootTrackerOrLog()
   gm.refreshProofCacheOrLog()
 
-  debug "Tree snapshot loaded successfully", memberCount = memberCount, nextIndex = nextIndex
+  debug "Tree snapshot loaded successfully",
+    memberCount = memberCount, nextIndex = nextIndex
   ok()
 
 proc saveTreeToFile*(gm: OffchainGroupManager, path: string): RlnResult[void] =
@@ -929,9 +930,7 @@ proc loadTreeFromFile*(gm: OffchainGroupManager, path: string): RlnResult[void] 
     if not flush(gm.rlnInstance.ctx):
       return err("Failed to flush tree after loading")
 
-    debug "Tree loaded and flushed",
-      path = path,
-      memberCount = gm.membershipByIndex.len
+    debug "Tree loaded and flushed", path = path, memberCount = gm.membershipByIndex.len
 
     return ok()
   except IOError as e:

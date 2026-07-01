@@ -106,9 +106,11 @@ type
     epoch*: Epoch
 
   # Callback types for coordination layer integration
-  PublishCallback* =
-    proc(contentTopic: string, data: seq[byte]): Future[void] {.gcsafe, raises: [].}
+  PublishCallback* = proc(
+    contentTopic: string, data: seq[byte]
+  ): Future[Result[void, string]] {.gcsafe, raises: [].}
     ## Callback for publishing messages to logos-messaging.
+    ## Returns an error string if publishing failed so callers can handle it.
 
   # RLN Witness input for explicit Merkle proof-based proof generation
   Field* = array[32, byte] ## 32-byte field element representation (256 bits).
@@ -150,8 +152,7 @@ type
 # as little-endian uint64. The remaining 24 bytes are zero-padded.
 
 proc calcEpoch*(
-    timestamp: float64,
-    epochDurationSeconds: float64 = EpochDurationSeconds,
+    timestamp: float64, epochDurationSeconds: float64 = EpochDurationSeconds
 ): Epoch =
   ## Calculate the epoch for a given Unix timestamp.
   let epochNum =
@@ -165,16 +166,11 @@ proc calcEpoch*(
   for i in 0 ..< Uint64ByteSize:
     result[i] = epochBytes[i]
 
-proc calcEpoch*(
-    t: Time,
-    epochDurationSeconds: float64 = EpochDurationSeconds,
-): Epoch =
+proc calcEpoch*(t: Time, epochDurationSeconds: float64 = EpochDurationSeconds): Epoch =
   ## Calculate the epoch for a given Time.
   calcEpoch(t.toUnixFloat(), epochDurationSeconds)
 
-proc currentEpoch*(
-    epochDurationSeconds: float64 = EpochDurationSeconds,
-): Epoch =
+proc currentEpoch*(epochDurationSeconds: float64 = EpochDurationSeconds): Epoch =
   ## Get the current epoch based on system time.
   calcEpoch(getTime(), epochDurationSeconds)
 
