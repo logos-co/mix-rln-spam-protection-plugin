@@ -26,8 +26,11 @@
 ## await plugin.init()
 ##
 ## # Set up logos-messaging integration
-## plugin.setPublishCallback(proc(topic: string, data: seq[byte]) {.async.} =
+## plugin.setPublishCallback(proc(
+##     topic: string, data: seq[byte]
+## ): Future[Result[void, string]] {.async.} =
 ##   await logosMessaging.publish(topic, data)
+##   ok()
 ## )
 ##
 ## # Start the plugin
@@ -71,26 +74,10 @@
 
 import
   ./mix_rln_spam_protection/[
-    types,
-    constants,
-    protobuf,
-    codec,
-    rln_interface,
-    group_manager,
-    nullifier_log,
-    spam_protection,
-    coordination,
-    credentials
+    types, constants, protobuf, codec, rln_interface, group_manager, nullifier_log,
+    spam_protection, coordination, credentials,
   ]
 
 export
-  types,
-  constants,
-  protobuf,
-  codec,
-  spam_protection,
-  coordination,
-  credentials,
-  group_manager,
-  nullifier_log,
-  rln_interface
+  types, constants, protobuf, codec, spam_protection, coordination, credentials,
+  group_manager, nullifier_log, rln_interface
