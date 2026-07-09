@@ -5,3 +5,5 @@ nimbledeps/
 librln.a
 src/mix_rln_spam_protection/rln_interface
 tests/test_all
+nimble.develop
+nimble.paths

@@ -2,16 +2,26 @@
 # Copyright (c) 2025 vacp2p
 # Licensed under either of Apache License 2.0 or MIT license.
 
-## Nim wrappers for zerokit RLN v2.0.0.
-## The higher-level API is kept intentionally close to the previous wrapper so
-## the rest of the plugin can migrate with minimal churn.
+## Nim wrappers for zerokit RLN v2.0.2 built with `--features stateless`.
+## The Merkle tree (set/get/delete leaves, root, inclusion proofs) lives on
+## the Nim side via `IncrementalMerkleTree`; zerokit is used only for
+## Poseidon hashing, witness construction, and Groth16 prove/verify.
+##
+## Switching to the stateless build lets the plugin share a single zerokit
+## archive with relay (which is also stateless), eliminating the dual-
+## archive symbol collision that was previously dodged by version-skew.
+##
+## Build: the plugin's zerokit dependency MUST be built with
+## `--no-default-features --features stateless`.  Stateful tree FFIs are
+## not present in stateless archives.
 
 import std/os
 import results, chronicles
 import ./types
 import ./constants
+import ./merkle_tree
 
-{.push raises: [].}
+{.push raises: [], gcsafe.}
 
 logScope:
   topics = "rln interface"
@@ -35,10 +45,6 @@ type
     dataPtr: ptr uint8
     len: CSize
     cap: CSize
-
-  FFI_MerkleProof = object
-    path_elements: Vec_CFr
-    path_index: Vec_uint8
 
   CBoolResult = object
     ok: bool
@@ -68,22 +74,13 @@ type
     ok: ptr FFI_RLNPartialWitnessInput
     err: Vec_uint8
 
-  CResultMerkleProofPtrVecU8 = object
-    ok: ptr FFI_MerkleProof
-    err: Vec_uint8
-
-  CResultVecCFrVecU8 = object
-    ok: Vec_CFr
-    err: Vec_uint8
-
   CResultVecU8VecU8 = object
     ok: Vec_uint8
     err: Vec_uint8
 
   FFI_RLNProofValues = object
 
-  PartialProofCache* = object
-    ## Cached partial proof tied to a specific Merkle root.
+  PartialProofCache* = object ## Cached partial proof tied to a specific Merkle root.
     root*: MerkleNode
     memberIndex*: MembershipIndex
     partialProofBytes*: seq[byte]
@@ -94,40 +91,66 @@ type
 
   RLNInstance* = ref object
     ctx*: ptr RLN
+    tree*: IncrementalMerkleTree
 
 const
-  SingleVersionByte = 0x00'u8
   FieldElementSize = 32
+  # Single-message-id RLN proof wire layout: outer version byte + 128-byte
+  # Groth16 + inner RLNProofValues (inner version + 5 field elements).
   ProofSerializationSize = 1 + ZksnarkProofByteSize + 1 + 5 * FieldElementSize
 
 proc computeExternalNullifier*(
-    epoch: Epoch, rlnIdentifier: RlnIdentifier
-): RlnResult[ExternalNullifier] {.gcsafe.}
+  epoch: Epoch, rlnIdentifier: RlnIdentifier
+): RlnResult[ExternalNullifier]
 
 proc ffi_cfr_free(cfr: ptr CFr) {.importc: "ffi_cfr_free", cdecl.}
-proc ffi_cfr_to_bytes_le(cfr: ptr CFr): Vec_uint8 {.importc: "ffi_cfr_to_bytes_le", cdecl.}
-proc ffi_bytes_le_to_cfr(bytes: ptr Vec_uint8): CResultCFrPtrVecU8 {.importc: "ffi_bytes_le_to_cfr", cdecl.}
-proc ffi_hash_to_field_le(input: ptr Vec_uint8): CResultCFrPtrVecU8 {.importc: "ffi_hash_to_field_le", cdecl.}
-proc ffi_poseidon_hash_pair(a: ptr CFr, b: ptr CFr): CResultCFrPtrVecU8 {.importc: "ffi_poseidon_hash_pair", cdecl.}
+proc ffi_cfr_to_bytes_le(
+  cfr: ptr CFr
+): Vec_uint8 {.importc: "ffi_cfr_to_bytes_le", cdecl.}
+
+proc ffi_bytes_le_to_cfr(
+  bytes: ptr Vec_uint8
+): CResultCFrPtrVecU8 {.importc: "ffi_bytes_le_to_cfr", cdecl.}
+
+# v2.0.1: hash_to_field_le / poseidon_hash_pair return ptr CFr directly
+# (no Result wrapper) — caller MUST ffi_cfr_free the returned ptr.
+proc ffi_hash_to_field_le(
+  input: ptr Vec_uint8
+): ptr CFr {.importc: "ffi_hash_to_field_le", cdecl.}
+
+proc ffi_poseidon_hash_pair(
+  a: ptr CFr, b: ptr CFr
+): ptr CFr {.importc: "ffi_poseidon_hash_pair", cdecl.}
 
 proc ffi_vec_cfr_new(capacity: CSize): Vec_CFr {.importc: "ffi_vec_cfr_new", cdecl.}
-proc ffi_vec_cfr_push(v: ptr Vec_CFr, cfr: ptr CFr) {.importc: "ffi_vec_cfr_push", cdecl.}
+proc ffi_vec_cfr_push(
+  v: ptr Vec_CFr, cfr: ptr CFr
+) {.importc: "ffi_vec_cfr_push", cdecl.}
+
 proc ffi_vec_cfr_len(v: ptr Vec_CFr): CSize {.importc: "ffi_vec_cfr_len", cdecl.}
-proc ffi_vec_cfr_get(v: ptr Vec_CFr, i: CSize): ptr CFr {.importc: "ffi_vec_cfr_get", cdecl.}
+proc ffi_vec_cfr_get(
+  v: ptr Vec_CFr, i: CSize
+): ptr CFr {.importc: "ffi_vec_cfr_get", cdecl.}
+
 proc ffi_vec_cfr_free(v: Vec_CFr) {.importc: "ffi_vec_cfr_free", cdecl.}
 proc ffi_vec_u8_free(v: Vec_uint8) {.importc: "ffi_vec_u8_free", cdecl.}
 proc ffi_c_string_free(s: Vec_uint8) {.importc: "ffi_c_string_free", cdecl.}
 
-proc ffi_extended_key_gen(): CResultVecCFrVecU8 {.importc: "ffi_extended_key_gen", cdecl.}
-proc ffi_seeded_extended_key_gen(seed: ptr Vec_uint8): CResultVecCFrVecU8 {.importc: "ffi_seeded_extended_key_gen", cdecl.}
+# v2.0.1: extended_key_gen / seeded_extended_key_gen return Vec_CFr directly
+# (no Result wrapper) — caller MUST ffi_vec_cfr_free the returned vec.
+proc ffi_extended_key_gen(): Vec_CFr {.importc: "ffi_extended_key_gen", cdecl.}
+proc ffi_seeded_extended_key_gen(
+  seed: ptr Vec_uint8
+): Vec_CFr {.importc: "ffi_seeded_extended_key_gen", cdecl.}
 
-proc ffi_rln_new(treeDepth: CSize, config: cstring): CResultRLNPtrVecU8 {.importc: "ffi_rln_new", cdecl.}
+# Stateless ffi_rln_new takes no args; ffi_rln_new_with_params takes only the
+# zkey + graph (no tree depth, no config — tree state is Nim-side now).
+proc ffi_rln_new(): CResultRLNPtrVecU8 {.importc: "ffi_rln_new", cdecl.}
 proc ffi_rln_new_with_params(
-  treeDepth: CSize,
-  zkey_data: ptr Vec_uint8,
-  graph_data: ptr Vec_uint8,
-  config: cstring,
+  zkey_data: ptr Vec_uint8, graph_data: ptr Vec_uint8
 ): CResultRLNPtrVecU8 {.importc: "ffi_rln_new_with_params", cdecl.}
+
+proc ffi_rln_free(rln: ptr FFI_RLN) {.importc: "ffi_rln_free", cdecl.}
 
 proc ffi_rln_witness_input_new(
   identity_secret: ptr CFr,
@@ -138,72 +161,103 @@ proc ffi_rln_witness_input_new(
   x: ptr CFr,
   external_nullifier: ptr CFr,
 ): CResultWitnessInputPtrVecU8 {.importc: "ffi_rln_witness_input_new", cdecl.}
-proc ffi_rln_witness_input_free(witness: ptr FFI_RLNWitnessInput) {.importc: "ffi_rln_witness_input_free", cdecl.}
+
+proc ffi_rln_witness_input_free(
+  witness: ptr FFI_RLNWitnessInput
+) {.importc: "ffi_rln_witness_input_free", cdecl.}
 
 proc ffi_rln_partial_witness_input_new(
   identity_secret: ptr CFr,
   user_message_limit: ptr CFr,
   path_elements: ptr Vec_CFr,
   identity_path_index: ptr Vec_uint8,
-): CResultPartialWitnessInputPtrVecU8 {.importc: "ffi_rln_partial_witness_input_new", cdecl.}
-proc ffi_rln_partial_witness_input_free(witness: ptr FFI_RLNPartialWitnessInput) {.importc: "ffi_rln_partial_witness_input_free", cdecl.}
+): CResultPartialWitnessInputPtrVecU8 {.
+  importc: "ffi_rln_partial_witness_input_new", cdecl
+.}
+
+proc ffi_rln_partial_witness_input_free(
+  witness: ptr FFI_RLNPartialWitnessInput
+) {.importc: "ffi_rln_partial_witness_input_free", cdecl.}
 
 proc ffi_generate_rln_proof(
-  rln: ptr ptr FFI_RLN,
-  witness: ptr ptr FFI_RLNWitnessInput,
+  rln: ptr ptr FFI_RLN, witness: ptr ptr FFI_RLNWitnessInput
 ): CResultProofPtrVecU8 {.importc: "ffi_generate_rln_proof", cdecl.}
+
 proc ffi_generate_partial_zk_proof(
-  rln: ptr ptr FFI_RLN,
-  partial_witness: ptr ptr FFI_RLNPartialWitnessInput,
+  rln: ptr ptr FFI_RLN, partial_witness: ptr ptr FFI_RLNPartialWitnessInput
 ): CResultPartialProofPtrVecU8 {.importc: "ffi_generate_partial_zk_proof", cdecl.}
+
 proc ffi_finish_rln_proof(
   rln: ptr ptr FFI_RLN,
   partial_proof: ptr ptr FFI_RLNPartialProof,
   witness: ptr ptr FFI_RLNWitnessInput,
 ): CResultProofPtrVecU8 {.importc: "ffi_finish_rln_proof", cdecl.}
-proc ffi_verify_rln_proof(
-  rln: ptr ptr FFI_RLN,
-  proof: ptr ptr FFI_RLNProof,
-  x: ptr CFr,
-): CBoolResult {.importc: "ffi_verify_rln_proof", cdecl.}
+
 proc ffi_verify_with_roots(
-  rln: ptr ptr FFI_RLN,
-  proof: ptr ptr FFI_RLNProof,
-  roots: ptr Vec_CFr,
-  x: ptr CFr,
+  rln: ptr ptr FFI_RLN, proof: ptr ptr FFI_RLNProof, roots: ptr Vec_CFr, x: ptr CFr
 ): CBoolResult {.importc: "ffi_verify_with_roots", cdecl.}
 
-proc ffi_delete_leaf(rln: ptr ptr FFI_RLN, index: CSize): CBoolResult {.importc: "ffi_delete_leaf", cdecl.}
-proc ffi_set_leaf(rln: ptr ptr FFI_RLN, index: CSize, leaf: ptr CFr): CBoolResult {.importc: "ffi_set_leaf", cdecl.}
-proc ffi_get_leaf(rln: ptr ptr FFI_RLN, index: CSize): CResultCFrPtrVecU8 {.importc: "ffi_get_leaf", cdecl.}
-proc ffi_set_next_leaf(rln: ptr ptr FFI_RLN, leaf: ptr CFr): CBoolResult {.importc: "ffi_set_next_leaf", cdecl.}
-proc ffi_get_root(rln: ptr ptr FFI_RLN): ptr CFr {.importc: "ffi_get_root", cdecl.}
-proc ffi_leaves_set(rln: ptr ptr FFI_RLN): CSize {.importc: "ffi_leaves_set", cdecl.}
-proc ffi_get_merkle_proof(rln: ptr ptr FFI_RLN, index: CSize): CResultMerkleProofPtrVecU8 {.importc: "ffi_get_merkle_proof", cdecl.}
-proc ffi_flush(rln: ptr ptr FFI_RLN): CBoolResult {.importc: "ffi_flush", cdecl.}
-proc ffi_merkle_proof_free(p: ptr FFI_MerkleProof) {.importc: "ffi_merkle_proof_free", cdecl.}
+# Stateless build: the tree (set_next_leaf/get_root/get_merkle_proof/set_leaf
+# /delete_leaf/get_leaf/leaves_set/flush/merkle_proof_free) lives on the Nim
+# side; see `merkle_tree.nim` and the IncrementalMerkleTree field on
+# RLNInstance.  None of those FFIs are present in stateless zerokit archives.
 
 proc ffi_compute_id_secret(
-  share1_x: ptr CFr,
-  share1_y: ptr CFr,
-  share2_x: ptr CFr,
-  share2_y: ptr CFr,
+  share1_x: ptr CFr, share1_y: ptr CFr, share2_x: ptr CFr, share2_y: ptr CFr
 ): CResultCFrPtrVecU8 {.importc: "ffi_compute_id_secret", cdecl.}
 
-proc ffi_rln_proof_get_values(proof: ptr ptr FFI_RLNProof): ptr FFI_RLNProofValues {.importc: "ffi_rln_proof_get_values", cdecl.}
-proc ffi_rln_proof_to_bytes_le(proof: ptr ptr FFI_RLNProof): CResultVecU8VecU8 {.importc: "ffi_rln_proof_to_bytes_le", cdecl.}
-proc ffi_bytes_le_to_rln_proof(bytes: ptr Vec_uint8): CResultProofPtrVecU8 {.importc: "ffi_bytes_le_to_rln_proof", cdecl.}
+proc ffi_rln_proof_get_values(
+  proof: ptr ptr FFI_RLNProof
+): ptr FFI_RLNProofValues {.importc: "ffi_rln_proof_get_values", cdecl.}
+
+proc ffi_rln_proof_to_bytes_le(
+  proof: ptr ptr FFI_RLNProof
+): CResultVecU8VecU8 {.importc: "ffi_rln_proof_to_bytes_le", cdecl.}
+
+# v2.0.2: construct an RLNProof directly from its field elements (single
+# message-id variant), avoiding the manual 290-byte wire layout.
+proc ffi_rln_proof_new(
+  groth16Bytes: ptr Vec_uint8,
+  root: ptr CFr,
+  externalNullifier: ptr CFr,
+  x: ptr CFr,
+  y: ptr CFr,
+  nullifier: ptr CFr,
+): CResultProofPtrVecU8 {.importc: "ffi_rln_proof_new", cdecl.}
+
 proc ffi_rln_proof_free(p: ptr FFI_RLNProof) {.importc: "ffi_rln_proof_free", cdecl.}
 
-proc ffi_rln_partial_proof_to_bytes_le(partial_proof: ptr ptr FFI_RLNPartialProof): CResultVecU8VecU8 {.importc: "ffi_rln_partial_proof_to_bytes_le", cdecl.}
-proc ffi_bytes_le_to_rln_partial_proof(bytes: ptr Vec_uint8): CResultPartialProofPtrVecU8 {.importc: "ffi_bytes_le_to_rln_partial_proof", cdecl.}
-proc ffi_rln_partial_proof_free(partial_proof: ptr FFI_RLNPartialProof) {.importc: "ffi_rln_partial_proof_free", cdecl.}
+proc ffi_rln_partial_proof_to_bytes_le(
+  partial_proof: ptr ptr FFI_RLNPartialProof
+): CResultVecU8VecU8 {.importc: "ffi_rln_partial_proof_to_bytes_le", cdecl.}
 
-proc ffi_rln_proof_values_get_y(pv: ptr ptr FFI_RLNProofValues): CResultCFrPtrVecU8 {.importc: "ffi_rln_proof_values_get_y", cdecl.}
-proc ffi_rln_proof_values_get_nullifier(pv: ptr ptr FFI_RLNProofValues): CResultCFrPtrVecU8 {.importc: "ffi_rln_proof_values_get_nullifier", cdecl.}
-proc ffi_rln_proof_values_get_root(pv: ptr ptr FFI_RLNProofValues): ptr CFr {.importc: "ffi_rln_proof_values_get_root", cdecl.}
-proc ffi_rln_proof_values_get_x(pv: ptr ptr FFI_RLNProofValues): ptr CFr {.importc: "ffi_rln_proof_values_get_x", cdecl.}
-proc ffi_rln_proof_values_free(pv: ptr FFI_RLNProofValues) {.importc: "ffi_rln_proof_values_free", cdecl.}
+proc ffi_bytes_le_to_rln_partial_proof(
+  bytes: ptr Vec_uint8
+): CResultPartialProofPtrVecU8 {.importc: "ffi_bytes_le_to_rln_partial_proof", cdecl.}
+
+proc ffi_rln_partial_proof_free(
+  partial_proof: ptr FFI_RLNPartialProof
+) {.importc: "ffi_rln_partial_proof_free", cdecl.}
+
+proc ffi_rln_proof_values_get_y(
+  pv: ptr ptr FFI_RLNProofValues
+): CResultCFrPtrVecU8 {.importc: "ffi_rln_proof_values_get_y", cdecl.}
+
+proc ffi_rln_proof_values_get_nullifier(
+  pv: ptr ptr FFI_RLNProofValues
+): CResultCFrPtrVecU8 {.importc: "ffi_rln_proof_values_get_nullifier", cdecl.}
+
+proc ffi_rln_proof_values_get_root(
+  pv: ptr ptr FFI_RLNProofValues
+): ptr CFr {.importc: "ffi_rln_proof_values_get_root", cdecl.}
+
+proc ffi_rln_proof_values_get_x(
+  pv: ptr ptr FFI_RLNProofValues
+): ptr CFr {.importc: "ffi_rln_proof_values_get_x", cdecl.}
+
+proc ffi_rln_proof_values_free(
+  pv: ptr FFI_RLNProofValues
+) {.importc: "ffi_rln_proof_values_free", cdecl.}
 
 proc asString(data: Vec_uint8): string =
   if data.dataPtr.isNil or data.len == 0:
@@ -239,28 +293,6 @@ proc vecToSeq(data: Vec_uint8): seq[byte] =
   if result.len > 0:
     copyMem(addr result[0], data.dataPtr, result.len)
 
-proc merkleProofPathElementsToSeq(merkleProof: ptr FFI_MerkleProof): RlnResult[seq[byte]] =
-  let depth = int(merkleProof[].path_index.len)
-  var pathElements = newSeq[byte](depth * FieldElementSize)
-  if depth == 0:
-    return ok(pathElements)
-
-  for i in 0 ..< depth:
-    let element = ffi_vec_cfr_get(addr merkleProof[].path_elements, CSize(i))
-    if element.isNil:
-      return err("Missing Merkle path element at index " & $i)
-
-    let bytes = ffi_cfr_to_bytes_le(element)
-    defer:
-      ffi_vec_u8_free(bytes)
-
-    if int(bytes.len) != FieldElementSize:
-      return err("Invalid Merkle path element size")
-
-    copyMem(addr pathElements[i * FieldElementSize], bytes.dataPtr, FieldElementSize)
-
-  ok(pathElements)
-
 proc stringToBytes(s: string): seq[byte] =
   result = newSeq[byte](s.len)
   if s.len > 0:
@@ -292,12 +324,12 @@ proc bytesToCfrLe(data: openArray[byte]): RlnResult[ptr CFr] =
 
 proc hashToFieldLe(data: openArray[byte]): RlnResult[ptr CFr] =
   var vec = toVecUint8(data)
-  let res = ffi_hash_to_field_le(addr vec)
-  if not res.ok.isNil:
-    return ok(res.ok)
-  err(consumeError("Failed to hash to field: ", res.err))
+  let cfr = ffi_hash_to_field_le(addr vec)
+  if cfr.isNil:
+    return err("Failed to hash to field")
+  ok(cfr)
 
-proc poseidonPairLe(a, b: openArray[byte]): RlnResult[array[32, byte]] =
+proc poseidonPairLe*(a, b: openArray[byte]): RlnResult[array[32, byte]] =
   let aPtr = bytesToCfrLe(a).valueOr:
     return err(error)
   defer:
@@ -308,15 +340,27 @@ proc poseidonPairLe(a, b: openArray[byte]): RlnResult[array[32, byte]] =
   defer:
     ffi_cfr_free(bPtr)
 
-  let res = ffi_poseidon_hash_pair(aPtr, bPtr)
-  if res.ok.isNil:
-    return err(consumeError("Poseidon hash failed: ", res.err))
+  let cfr = ffi_poseidon_hash_pair(aPtr, bPtr)
+  if cfr.isNil:
+    return err("Poseidon hash failed")
   defer:
-    ffi_cfr_free(res.ok)
+    ffi_cfr_free(cfr)
 
-  cfrToBytesLe(res.ok)
+  cfrToBytesLe(cfr)
 
-proc cfrResultToBytes(res: CResultCFrPtrVecU8, prefix: string): RlnResult[array[32, byte]] =
+proc poseidonHashFn(a, b: MerkleNode): MerkleNode {.gcsafe, raises: [].} =
+  ## Adapter from the IMT's hash-callback signature to `poseidonPairLe`.
+  ## All inputs at this point are either `ZERO_FIELD` or a previous
+  ## Poseidon output — both valid BN254 field elements — so a failure
+  ## indicates FFI corruption and is treated as a contract violation.
+  let r = poseidonPairLe(a, b)
+  if r.isErr:
+    raiseAssert "poseidonPairLe failed in IMT hash callback: " & r.error
+  r.get()
+
+proc cfrResultToBytes(
+    res: CResultCFrPtrVecU8, prefix: string
+): RlnResult[array[32, byte]] =
   if res.ok.isNil:
     return err(consumeError(prefix, res.err))
   defer:
@@ -334,46 +378,11 @@ proc toRootVec(validRoots: seq[MerkleNode]): RlnResult[Vec_CFr] =
   ok(roots)
 
 proc getCurrentRootRaw(instance: RLNInstance): RlnResult[MerkleNode] =
-  var ctx = instance.ctx
-  let rootPtr = ffi_get_root(addr ctx)
-  if rootPtr.isNil:
-    return err("Failed to get Merkle root")
-  defer:
-    ffi_cfr_free(rootPtr)
-  cfrToBytesLe(rootPtr)
-
-proc buildProofBytesLe(
-    proof: RateLimitProof, rlnIdentifier: RlnIdentifier
-): RlnResult[seq[byte]] =
-  let externalNullifier = computeExternalNullifier(proof.epoch, rlnIdentifier).valueOr:
-    return err("Failed to compute external nullifier: " & error)
-
-  var encoded = newSeq[byte](ProofSerializationSize)
-  var offset = 0
-
-  encoded[offset] = SingleVersionByte
-  inc offset
-
-  copyMem(addr encoded[offset], unsafeAddr proof.proof[0], ZksnarkProofByteSize)
-  offset += ZksnarkProofByteSize
-
-  encoded[offset] = SingleVersionByte
-  inc offset
-
-  copyMem(addr encoded[offset], unsafeAddr proof.merkleRoot[0], HashByteSize)
-  offset += HashByteSize
-
-  copyMem(addr encoded[offset], unsafeAddr externalNullifier[0], HashByteSize)
-  offset += HashByteSize
-
-  copyMem(addr encoded[offset], unsafeAddr proof.shareX[0], HashByteSize)
-  offset += HashByteSize
-
-  copyMem(addr encoded[offset], unsafeAddr proof.shareY[0], HashByteSize)
-  offset += HashByteSize
-
-  copyMem(addr encoded[offset], unsafeAddr proof.nullifier[0], HashByteSize)
-  ok(encoded)
+  ## Read the current Merkle root from the Nim-side incremental tree.
+  ## Returns a Result for API parity with the old pmtree-backed wrapper
+  ## (which could fail at the FFI boundary); the IMT path is infallible
+  ## but callers don't need to know that.
+  ok(instance.tree.getRoot())
 
 proc proofPtrToRateLimitProof(
     proofPtr: ptr FFI_RLNProof, epoch: Epoch
@@ -426,24 +435,20 @@ proc proofPtrToRateLimitProof(
 
   ok(proof)
 
-proc getMerkleProofRaw(
-    instance: RLNInstance, index: MembershipIndex
-): RlnResult[ptr FFI_MerkleProof] =
-  var ctx = instance.ctx
-  let res = ffi_get_merkle_proof(addr ctx, CSize(index))
-  if res.ok.isNil:
-    return err(consumeError("Failed to get Merkle proof: ", res.err))
-  ok(res.ok)
-
-proc buildWitness(
-    merkleProof: ptr FFI_MerkleProof,
+proc buildWitnessFromPath(
+    pathElements: ptr Vec_CFr,
+    pathIndex: ptr Vec_uint8,
     credential: IdentityCredential,
     epoch: Epoch,
     rlnIdentifier: RlnIdentifier,
     signal: openArray[byte],
     messageId: uint,
     userMessageLimit: uint64,
-): RlnResult[ptr FFI_RLNWitnessInput] {.gcsafe.} =
+    errPrefix: string,
+): RlnResult[ptr FFI_RLNWitnessInput] =
+  ## Build a witness from a caller-prepared Merkle path. Both overloads of
+  ## `buildWitness` funnel through here once their path inputs are in the
+  ## FFI-shaped Vec form.
   let identitySecret = bytesToCfrLe(credential.idSecretHash).valueOr:
     return err(error)
   defer:
@@ -473,17 +478,12 @@ proc buildWitness(
     ffi_cfr_free(externalNullifier)
 
   let witnessRes = ffi_rln_witness_input_new(
-    identitySecret,
-    userLimit,
-    messageIdFr,
-    addr merkleProof[].path_elements,
-    addr merkleProof[].path_index,
-    x,
+    identitySecret, userLimit, messageIdFr, pathElements, pathIndex, x,
     externalNullifier,
   )
 
   if witnessRes.ok.isNil:
-    return err(consumeError("Failed to create witness: ", witnessRes.err))
+    return err(consumeError(errPrefix, witnessRes.err))
 
   ok(witnessRes.ok)
 
@@ -496,11 +496,16 @@ proc buildWitness(
     signal: openArray[byte],
     messageId: uint,
     userMessageLimit: uint64,
-): RlnResult[ptr FFI_RLNWitnessInput] {.gcsafe.} =
+): RlnResult[ptr FFI_RLNWitnessInput] =
+  ## Reconstruct a `Vec_CFr` from the IMT-produced bytes and feed it to
+  ## zerokit's witness FFI.  Both proof-generation paths (fresh and
+  ## partial-cache reuse) go through this single byte-based overload now
+  ## that the Merkle tree is Nim-side; the previous ptr-FFI_MerkleProof
+  ## overload is gone with the pmtree backend.
   if pathElements.len != pathIndex.len * FieldElementSize:
     return err(
-      "Invalid cached Merkle path: expected " &
-        $(pathIndex.len * FieldElementSize) & " bytes, got " & $pathElements.len
+      "Invalid cached Merkle path: expected " & $(pathIndex.len * FieldElementSize) &
+        " bytes, got " & $pathElements.len
     )
 
   var pathElementsVec = ffi_vec_cfr_new(CSize(pathIndex.len))
@@ -509,112 +514,67 @@ proc buildWitness(
 
   for i in 0 ..< pathIndex.len:
     let start = i * FieldElementSize
-    let element = bytesToCfrLe(pathElements.toOpenArray(start, start + FieldElementSize - 1)).valueOr:
+    let element = bytesToCfrLe(
+      pathElements.toOpenArray(start, start + FieldElementSize - 1)
+    ).valueOr:
       return err(error)
     ffi_vec_cfr_push(addr pathElementsVec, element)
     ffi_cfr_free(element)
 
   var pathIndexVec = toVecUint8(pathIndex)
 
-  let identitySecret = bytesToCfrLe(credential.idSecretHash).valueOr:
-    return err(error)
-  defer:
-    ffi_cfr_free(identitySecret)
-
-  let userLimit = bytesToCfrLe(uint64ToField(userMessageLimit)).valueOr:
-    return err(error)
-  defer:
-    ffi_cfr_free(userLimit)
-
-  let messageIdFr = bytesToCfrLe(uint64ToField(uint64(messageId))).valueOr:
-    return err(error)
-  defer:
-    ffi_cfr_free(messageIdFr)
-
-  let x = hashToFieldLe(signal).valueOr:
-    return err(error)
-  defer:
-    ffi_cfr_free(x)
-
-  let externalNullifierBytes = computeExternalNullifier(epoch, rlnIdentifier).valueOr:
-    return err("Failed to compute external nullifier: " & error)
-
-  let externalNullifier = bytesToCfrLe(externalNullifierBytes).valueOr:
-    return err(error)
-  defer:
-    ffi_cfr_free(externalNullifier)
-
-  let witnessRes = ffi_rln_witness_input_new(
-    identitySecret,
-    userLimit,
-    messageIdFr,
+  buildWitnessFromPath(
     addr pathElementsVec,
     addr pathIndexVec,
-    x,
-    externalNullifier,
+    credential,
+    epoch,
+    rlnIdentifier,
+    signal,
+    messageId,
+    userMessageLimit,
+    "Failed to create witness from cached Merkle path: ",
   )
 
-  if witnessRes.ok.isNil:
-    return err(consumeError("Failed to create witness from cached Merkle path: ", witnessRes.err))
-
-  ok(witnessRes.ok)
-
-proc membershipKeyGen*(): RlnResult[IdentityCredential] =
-  let res = ffi_extended_key_gen()
-  if hasError(res.err):
-    return err(consumeError("Key generation failed: ", res.err))
-  defer:
-    ffi_vec_cfr_free(res.ok)
-
-  if int(ffi_vec_cfr_len(addr res.ok)) != 4:
+proc parseCredentialVec(vec: var Vec_CFr): RlnResult[IdentityCredential] =
+  ## ffi_extended_key_gen returns a Vec_CFr of exactly 4 elements:
+  ## [ idTrapdoor, idNullifier, idSecretHash, idCommitment ].
+  if int(ffi_vec_cfr_len(addr vec)) != 4:
     return err("Unexpected credential element count")
 
   var cred: IdentityCredential
   let fields = [
-    ffi_vec_cfr_get(addr res.ok, 0),
-    ffi_vec_cfr_get(addr res.ok, 1),
-    ffi_vec_cfr_get(addr res.ok, 2),
-    ffi_vec_cfr_get(addr res.ok, 3),
+    ffi_vec_cfr_get(addr vec, 0),
+    ffi_vec_cfr_get(addr vec, 1),
+    ffi_vec_cfr_get(addr vec, 2),
+    ffi_vec_cfr_get(addr vec, 3),
   ]
   for field in fields:
     if field.isNil:
       return err("Missing credential field from zerokit")
 
-  cred.idTrapdoor = cfrToBytesLe(fields[0]).valueOr: return err(error)
-  cred.idNullifier = cfrToBytesLe(fields[1]).valueOr: return err(error)
-  cred.idSecretHash = cfrToBytesLe(fields[2]).valueOr: return err(error)
-  cred.idCommitment = cfrToBytesLe(fields[3]).valueOr: return err(error)
+  cred.idTrapdoor = cfrToBytesLe(fields[0]).valueOr:
+    return err(error)
+  cred.idNullifier = cfrToBytesLe(fields[1]).valueOr:
+    return err(error)
+  cred.idSecretHash = cfrToBytesLe(fields[2]).valueOr:
+    return err(error)
+  cred.idCommitment = cfrToBytesLe(fields[3]).valueOr:
+    return err(error)
 
   ok(cred)
+
+proc membershipKeyGen*(): RlnResult[IdentityCredential] =
+  var vec = ffi_extended_key_gen()
+  defer:
+    ffi_vec_cfr_free(vec)
+  parseCredentialVec(vec)
 
 proc membershipKeyGen*(seed: openArray[byte]): RlnResult[IdentityCredential] =
   var seedVec = toVecUint8(seed)
-  let res = ffi_seeded_extended_key_gen(addr seedVec)
-  if hasError(res.err):
-    return err(consumeError("Seeded key generation failed: ", res.err))
+  var vec = ffi_seeded_extended_key_gen(addr seedVec)
   defer:
-    ffi_vec_cfr_free(res.ok)
-
-  if int(ffi_vec_cfr_len(addr res.ok)) != 4:
-    return err("Unexpected credential element count")
-
-  var cred: IdentityCredential
-  let fields = [
-    ffi_vec_cfr_get(addr res.ok, 0),
-    ffi_vec_cfr_get(addr res.ok, 1),
-    ffi_vec_cfr_get(addr res.ok, 2),
-    ffi_vec_cfr_get(addr res.ok, 3),
-  ]
-  for field in fields:
-    if field.isNil:
-      return err("Missing credential field from zerokit")
-
-  cred.idTrapdoor = cfrToBytesLe(fields[0]).valueOr: return err(error)
-  cred.idNullifier = cfrToBytesLe(fields[1]).valueOr: return err(error)
-  cred.idSecretHash = cfrToBytesLe(fields[2]).valueOr: return err(error)
-  cred.idCommitment = cfrToBytesLe(fields[3]).valueOr: return err(error)
-
-  ok(cred)
+    ffi_vec_cfr_free(vec)
+  parseCredentialVec(vec)
 
 proc generateMembershipKey*(): RlnResult[IdentityCredential] =
   membershipKeyGen()
@@ -623,14 +583,14 @@ proc generateMembershipKey*(seed: openArray[byte]): RlnResult[IdentityCredential
   membershipKeyGen(seed)
 
 proc createRLNInstance*(resourcesPath: string = ""): RlnResult[RLNInstance] =
+  ## Build a stateless zerokit RLN instance (used only for Poseidon hashing,
+  ## witness construction, and Groth16 prove/verify) and pair it with a
+  ## fresh Nim-side `IncrementalMerkleTree` for the membership Merkle tree.
   trace "Creating RLN instance", resourcesPath = resourcesPath
-
-  let treeDepth = CSize(MerkleTreeDepth)
-  let configPath = "".cstring
 
   let res =
     if resourcesPath.len == 0:
-      ffi_rln_new(treeDepth, configPath)
+      ffi_rln_new()
     else:
       let zkeyPath = resourcesPath / "rln_final.arkzkey"
       let graphPath = resourcesPath / "graph.bin"
@@ -651,21 +611,29 @@ proc createRLNInstance*(resourcesPath: string = ""): RlnResult[RLNInstance] =
           return err("Failed to read " & graphPath & ": " & e.msg)
       var zkeyVec = toVecUint8(zkeyBytes)
       var graphVec = toVecUint8(graphBytes)
-      ffi_rln_new_with_params(treeDepth, addr zkeyVec, addr graphVec, configPath)
+      ffi_rln_new_with_params(addr zkeyVec, addr graphVec)
 
   if res.ok.isNil:
     return err(consumeError("Failed to create RLN instance: ", res.err))
 
-  let instance = RLNInstance(ctx: cast[ptr RLN](res.ok))
-  let initialRoot = getCurrentRootRaw(instance).valueOr:
-    trace "RLN instance created without readable initial root", error = error
-    return ok(instance)
+  let instance = RLNInstance(
+    ctx: cast[ptr RLN](res.ok),
+    tree: IncrementalMerkleTree.init(MerkleTreeDepth, poseidonHashFn),
+  )
 
-  debug "RLN instance created successfully", initialTreeRoot = initialRoot.toHex()
+  debug "RLN instance created successfully",
+    initialTreeRoot = instance.tree.getRoot().toHex(), treeDepth = MerkleTreeDepth
   ok(instance)
 
 proc newRLNInstance*(resourcesPath: string = ""): RlnResult[RLNInstance] =
   createRLNInstance(resourcesPath)
+
+proc close*(instance: RLNInstance) =
+  ## Release the underlying zerokit FFI_RLN box. Idempotent: subsequent calls
+  ## are no-ops. After close, the instance must not be used.
+  if not instance.isNil and not instance.ctx.isNil:
+    ffi_rln_free(instance.ctx)
+    instance.ctx = nil
 
 proc poseidonHash*(inputs: seq[seq[byte]]): RlnResult[array[32, byte]] =
   case inputs.len
@@ -678,12 +646,12 @@ proc poseidonHash*(inputs: seq[seq[byte]]): RlnResult[array[32, byte]] =
 
 proc computeExternalNullifier*(
     epoch: Epoch, rlnIdentifier: RlnIdentifier
-): RlnResult[ExternalNullifier] {.gcsafe.} =
+): RlnResult[ExternalNullifier] =
   poseidonPairLe(epoch, rlnIdentifier)
 
 proc computeRateCommitment*(
     idCommitment: IDCommitment, userMessageLimit: uint64
-): RlnResult[IDCommitment] {.gcsafe.} =
+): RlnResult[IDCommitment] =
   let limitField = uint64ToField(userMessageLimit)
   poseidonPairLe(idCommitment, limitField)
 
@@ -693,106 +661,99 @@ proc getMerkleRoot*(instance: RLNInstance): RlnResult[MerkleNode] =
 proc getMerkleProof*(
     instance: RLNInstance, index: MembershipIndex
 ): RlnResult[seq[byte]] =
-  let merkleProof = instance.getMerkleProofRaw(index).valueOr:
-    return err(error)
-  defer:
-    ffi_merkle_proof_free(merkleProof)
-
-  let depth = int(merkleProof[].path_index.len)
-  var encoded = newSeq[byte](8 + depth * FieldElementSize + 8 + depth)
-
-  let depthBytes = uint64(depth).toBytesLE()
-  copyMem(addr encoded[0], unsafeAddr depthBytes[0], 8)
-
-  var offset = 8
-  for i in 0 ..< depth:
-    let element = ffi_vec_cfr_get(addr merkleProof[].path_elements, CSize(i))
-    if element.isNil:
-      return err("Missing Merkle path element at index " & $i)
-    let bytes = ffi_cfr_to_bytes_le(element)
-    defer:
-      ffi_vec_u8_free(bytes)
-    if int(bytes.len) != FieldElementSize:
-      return err("Invalid Merkle path element size")
-    copyMem(addr encoded[offset], bytes.dataPtr, FieldElementSize)
-    offset += FieldElementSize
-
-  copyMem(addr encoded[offset], unsafeAddr depthBytes[0], 8)
-  offset += 8
-
-  if depth > 0:
-    copyMem(addr encoded[offset], merkleProof[].path_index.dataPtr, depth)
-
-  ok(encoded)
+  ## Inclusion proof encoded in the legacy zerokit wire format:
+  ##   u64-LE depth | depth*32 path_elements | u64-LE depth | depth bytes path_index
+  ## At depth 20 this is 676 bytes.  Byte-for-byte equivalent to the
+  ## pmtree-backed implementation it replaced (locked down by
+  ## `tests/test_merkle_tree.nim`'s parity check against pmtree).
+  let proofRes = instance.tree.getInclusionProof(uint64(index))
+  if proofRes.isErr:
+    return err(proofRes.error)
+  let (pathElements, pathIndex) = proofRes.get()
+  ok(encodeProof(pathElements, pathIndex))
 
 proc getLeaf*(instance: RLNInstance, index: MembershipIndex): RlnResult[IDCommitment] =
-  var ctx = instance.ctx
-  let res = ffi_get_leaf(addr ctx, CSize(index))
-  cfrResultToBytes(res, "Failed to get leaf: ")
+  instance.tree.getLeaf(uint64(index))
 
 proc insertMember*(
     instance: RLNInstance, commitment: IDCommitment
 ): RlnResult[MembershipIndex] =
-  var ctx = instance.ctx
-  let currentIndex = MembershipIndex(ffi_leaves_set(addr ctx))
-  let leaf = bytesToCfrLe(commitment).valueOr:
-    return err(error)
-  defer:
-    ffi_cfr_free(leaf)
-
-  let res = ffi_set_next_leaf(addr ctx, leaf)
-  if not res.ok:
-    return err(consumeError("Failed to insert member: ", res.err))
-  ok(currentIndex)
+  let idxRes = instance.tree.insertLeaf(commitment)
+  if idxRes.isErr:
+    return err("Failed to insert member: " & idxRes.error)
+  ok(MembershipIndex(idxRes.get()))
 
 proc removeMember*(instance: RLNInstance, index: MembershipIndex): RlnResult[void] =
-  var ctx = instance.ctx
-  let res = ffi_delete_leaf(addr ctx, CSize(index))
-  if not res.ok:
-    return err(consumeError("Failed to remove member: ", res.err))
+  ## Reset the leaf at `index` to zero and propagate up.  Does not change
+  ## the next-index counter — previously used slots cannot be reused
+  ## (replay safety; matches zerokit pmtree semantics).
+  let r = instance.tree.deleteLeaf(uint64(index))
+  if r.isErr:
+    return err("Failed to remove member: " & r.error)
   ok()
 
 proc insertMemberAt*(
     instance: RLNInstance, index: MembershipIndex, commitment: IDCommitment
 ): RlnResult[void] =
-  var ctx = instance.ctx
-  let leaf = bytesToCfrLe(commitment).valueOr:
-    return err(error)
-  defer:
-    ffi_cfr_free(leaf)
-
-  let res = ffi_set_leaf(addr ctx, CSize(index), leaf)
-  if not res.ok:
-    return err(consumeError("Failed to insert member at index: ", res.err))
+  let r = instance.tree.setLeaf(uint64(index), commitment)
+  if r.isErr:
+    return err("Failed to insert member at index: " & r.error)
   ok()
 
 proc flush*(ctx: ptr RLN): bool =
-  var handle = cast[ptr FFI_RLN](ctx)
-  let res = ffi_flush(addr handle)
-  if not res.ok and hasError(res.err):
-    warn "RLN flush failed", error = asString(res.err)
-    ffi_c_string_free(res.err)
-  res.ok
+  ## No-op: the Nim IMT is always in-sync; callers that took a `ptr RLN`
+  ## (group_manager pre-proof flush + post-load flush) keep the same signature.
+  discard ctx
+  true
+
+proc imtPath(
+    instance: RLNInstance, memberIndex: MembershipIndex
+): RlnResult[tuple[pathElements: seq[byte], pathIndex: seq[byte]]] =
+  ## Pull a Merkle inclusion path for `memberIndex` out of the Nim IMT in
+  ## the (path_elements bytes, path_index bytes) shape that the byte-based
+  ## `buildWitness` and the `ffi_rln_partial_witness_input_new` reconstruction
+  ## both consume.
+  instance.tree.getInclusionProof(uint64(memberIndex))
+
+proc pathBytesToVec(
+    pathElements: openArray[byte], pathIndexLen: int
+): RlnResult[Vec_CFr] =
+  ## Reconstruct a `Vec_CFr` from concatenated 32-byte LE elements.  Caller
+  ## owns the returned Vec_CFr and must free it with `ffi_vec_cfr_free`.
+  if pathElements.len != pathIndexLen * FieldElementSize:
+    return err(
+      "Invalid Merkle path: expected " & $(pathIndexLen * FieldElementSize) &
+        " bytes, got " & $pathElements.len
+    )
+  var vec = ffi_vec_cfr_new(CSize(pathIndexLen))
+  for i in 0 ..< pathIndexLen:
+    let start = i * FieldElementSize
+    let element = bytesToCfrLe(
+      pathElements.toOpenArray(start, start + FieldElementSize - 1)
+    ).valueOr:
+      ffi_vec_cfr_free(vec)
+      return err(error)
+    ffi_vec_cfr_push(addr vec, element)
+    ffi_cfr_free(element)
+  ok(vec)
 
 proc generatePartialProofCache*(
     instance: RLNInstance,
     credential: IdentityCredential,
     memberIndex: MembershipIndex,
     userMessageLimit: uint64 = UserMessageLimit,
-): RlnResult[PartialProofCache] {.gcsafe.} =
-  discard flush(instance.ctx)
-
-  let merkleProof = instance.getMerkleProofRaw(memberIndex).valueOr:
+): RlnResult[PartialProofCache] =
+  let (pathElements, pathIndex) = instance.imtPath(memberIndex).valueOr:
     return err(error)
-  defer:
-    ffi_merkle_proof_free(merkleProof)
-
-  let pathElements = merkleProofPathElementsToSeq(merkleProof).valueOr:
-    return err(error)
-  let pathIndex = vecToSeq(merkleProof[].path_index)
 
   let currentRoot = instance.getMerkleRoot().valueOr:
     return err("Failed to get current root for partial proof cache: " & error)
+
+  var pathElementsVec = pathBytesToVec(pathElements, pathIndex.len).valueOr:
+    return err(error)
+  defer:
+    ffi_vec_cfr_free(pathElementsVec)
+  var pathIndexVec = toVecUint8(pathIndex)
 
   let identitySecret = bytesToCfrLe(credential.idSecretHash).valueOr:
     return err(error)
@@ -805,13 +766,11 @@ proc generatePartialProofCache*(
     ffi_cfr_free(userLimit)
 
   let partialWitnessRes = ffi_rln_partial_witness_input_new(
-    identitySecret,
-    userLimit,
-    addr merkleProof[].path_elements,
-    addr merkleProof[].path_index,
+    identitySecret, userLimit, addr pathElementsVec, addr pathIndexVec
   )
   if partialWitnessRes.ok.isNil:
-    return err(consumeError("Failed to create partial witness: ", partialWitnessRes.err))
+    return
+      err(consumeError("Failed to create partial witness: ", partialWitnessRes.err))
 
   var ctx = instance.ctx
   var partialWitness = partialWitnessRes.ok
@@ -847,21 +806,12 @@ proc generateRlnProofWithWitness*(
     signal: openArray[byte],
     messageId: uint = 0,
     userMessageLimit: uint64 = UserMessageLimit,
-): RlnResult[RateLimitProof] {.gcsafe.} =
-  discard flush(instance.ctx)
-
-  let merkleProof = instance.getMerkleProofRaw(memberIndex).valueOr:
+): RlnResult[RateLimitProof] =
+  let (pathElements, pathIndex) = instance.imtPath(memberIndex).valueOr:
     return err(error)
-  defer:
-    ffi_merkle_proof_free(merkleProof)
 
   let witness = buildWitness(
-    merkleProof,
-    credential,
-    epoch,
-    rlnIdentifier,
-    signal,
-    messageId,
+    pathElements, pathIndex, credential, epoch, rlnIdentifier, signal, messageId,
     userMessageLimit,
   ).valueOr:
     return err(error)
@@ -888,7 +838,7 @@ proc finishRlnProofWithCache*(
     signal: openArray[byte],
     messageId: uint = 0,
     userMessageLimit: uint64 = UserMessageLimit,
-): RlnResult[RateLimitProof] {.gcsafe.} =
+): RlnResult[RateLimitProof] =
   let currentRoot = instance.getMerkleRoot().valueOr:
     return err("Failed to get current root: " & error)
 
@@ -899,14 +849,8 @@ proc finishRlnProofWithCache*(
     return err("Cached partial proof does not match the requested membership index")
 
   let witness = buildWitness(
-    cache.pathElements,
-    cache.pathIndex,
-    credential,
-    epoch,
-    rlnIdentifier,
-    signal,
-    messageId,
-    userMessageLimit,
+    cache.pathElements, cache.pathIndex, credential, epoch, rlnIdentifier, signal,
+    messageId, userMessageLimit,
   ).valueOr:
     return err(error)
   defer:
@@ -915,7 +859,9 @@ proc finishRlnProofWithCache*(
   var partialBytesVec = toVecUint8(cache.partialProofBytes)
   let partialProofRes = ffi_bytes_le_to_rln_partial_proof(addr partialBytesVec)
   if partialProofRes.ok.isNil:
-    return err(consumeError("Failed to deserialize cached partial proof: ", partialProofRes.err))
+    return err(
+      consumeError("Failed to deserialize cached partial proof: ", partialProofRes.err)
+    )
   defer:
     ffi_rln_partial_proof_free(partialProofRes.ok)
 
@@ -935,14 +881,50 @@ proc verifyRlnProof*(
     proof: RateLimitProof,
     rlnIdentifier: RlnIdentifier,
     signal: openArray[byte],
-    validRoots: seq[MerkleNode] = @[],
-): RlnResult[bool] {.gcsafe.} =
-  let proofBytes = buildProofBytesLe(proof, rlnIdentifier).valueOr:
-    return err(error)
-  var proofVec = toVecUint8(proofBytes)
-  let proofRes = ffi_bytes_le_to_rln_proof(addr proofVec)
+    validRoots: seq[MerkleNode],
+): RlnResult[bool] =
+  # v2.0.2: build the FFI_RLNProof directly from its field elements via
+  # ffi_rln_proof_new, instead of round-tripping through the 290-byte
+  # wire layout.
+  if validRoots.len == 0:
+    return err("verifyRlnProof requires at least one valid root")
+
+  let externalNullifier = computeExternalNullifier(proof.epoch, rlnIdentifier).valueOr:
+    return err("Failed to compute external nullifier: " & error)
+
+  var groth16Vec = toVecUint8(proof.proof)
+
+  let rootFr = bytesToCfrLe(proof.merkleRoot).valueOr:
+    return err("Failed to convert root: " & error)
+  defer:
+    ffi_cfr_free(rootFr)
+
+  let extNullFr = bytesToCfrLe(externalNullifier).valueOr:
+    return err("Failed to convert external nullifier: " & error)
+  defer:
+    ffi_cfr_free(extNullFr)
+
+  let shareXFr = bytesToCfrLe(proof.shareX).valueOr:
+    return err("Failed to convert shareX: " & error)
+  defer:
+    ffi_cfr_free(shareXFr)
+
+  let shareYFr = bytesToCfrLe(proof.shareY).valueOr:
+    return err("Failed to convert shareY: " & error)
+  defer:
+    ffi_cfr_free(shareYFr)
+
+  let nullifierFr = bytesToCfrLe(proof.nullifier).valueOr:
+    return err("Failed to convert nullifier: " & error)
+  defer:
+    ffi_cfr_free(nullifierFr)
+
+  let proofRes = ffi_rln_proof_new(
+    addr groth16Vec, rootFr, extNullFr, shareXFr, shareYFr, nullifierFr
+  )
   if proofRes.ok.isNil:
-    return err(consumeError("Failed to deserialize proof for verification: ", proofRes.err))
+    return
+      err(consumeError("Failed to build RLN proof for verification: ", proofRes.err))
   defer:
     ffi_rln_proof_free(proofRes.ok)
 
@@ -954,25 +936,19 @@ proc verifyRlnProof*(
   var ctx = instance.ctx
   var proofHandle = proofRes.ok
 
-  if validRoots.len > 0:
-    var roots = toRootVec(validRoots).valueOr:
-      return err("Failed to build root vector: " & error)
-    defer:
-      ffi_vec_cfr_free(roots)
+  var roots = toRootVec(validRoots).valueOr:
+    return err("Failed to build root vector: " & error)
+  defer:
+    ffi_vec_cfr_free(roots)
 
-    let verifyRes = ffi_verify_with_roots(addr ctx, addr proofHandle, addr roots, x)
-    if hasError(verifyRes.err):
-      return err(consumeError("Proof verification failed: ", verifyRes.err))
-    return ok(verifyRes.ok)
-
-  let verifyRes = ffi_verify_rln_proof(addr ctx, addr proofHandle, x)
+  let verifyRes = ffi_verify_with_roots(addr ctx, addr proofHandle, addr roots, x)
   if hasError(verifyRes.err):
     return err(consumeError("Proof verification failed: ", verifyRes.err))
   ok(verifyRes.ok)
 
 proc recoverSecret*(
     instance: RLNInstance, proof1: RateLimitProof, proof2: RateLimitProof
-): RlnResult[array[32, byte]] {.gcsafe.} =
+): RlnResult[array[32, byte]] =
   discard instance
   if proof1.nullifier != proof2.nullifier:
     return err("Cannot recover secret: proofs have different nullifiers")

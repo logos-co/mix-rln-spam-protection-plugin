@@ -7,7 +7,7 @@
 ## This module provides the MixRlnSpamProtection type that can be used with
 ## the mix protocol for per-hop proof generation and verification.
 
-import std/[math, options, deques, times]
+import std/[math, options, deques, times, sequtils]
 import chronos
 import results
 import chronicles
@@ -65,6 +65,10 @@ type
     publishCallback: Option[PublishCallback]
     spamHandler: Option[SpamHandler]
     epochTimerLoop: Future[void]
+    pendingBroadcasts: seq[Future[void]]
+      ## In-flight best-effort proof-metadata broadcasts. verifyProof is
+      ## synchronous so it cannot await these; they are tracked here (pruned
+      ## when finished) and cancelled in stop() instead of being orphaned.
 
 proc defaultRlnIdentifier*(): RlnIdentifier =
   ## Get the default RLN identifier.
@@ -90,7 +94,9 @@ proc defaultConfig*(): MixRlnConfig =
     proofMetadataContentTopic: ProofMetadataContentTopic,
   )
 
-proc newMixRlnSpamProtection*(config: MixRlnConfig): RlnResult[MixRlnSpamProtection] =
+proc new*(
+    T: typedesc[MixRlnSpamProtection], config: MixRlnConfig
+): RlnResult[MixRlnSpamProtection] =
   ## Create a new MixRlnSpamProtection instance.
   ##
   ## The instance must be initialized with init() before use.
@@ -255,10 +261,25 @@ proc stop*(sp: MixRlnSpamProtection) {.async.} =
   if not sp.epochTimerLoop.isNil:
     await sp.epochTimerLoop.cancelAndWait()
 
+  # Cancel any in-flight proof-metadata broadcasts.
+  for fut in sp.pendingBroadcasts:
+    if not fut.isNil and not fut.finished:
+      await fut.cancelAndWait()
+  sp.pendingBroadcasts.setLen(0)
+
   await sp.groupManager.stop()
   await sp.nullifierLog.stop()
 
   info "MixRlnSpamProtection stopped"
+
+proc broadcastProofMetadata(
+    sp: MixRlnSpamProtection, data: seq[byte]
+) {.async, gcsafe.} =
+  ## Best-effort broadcast of proof metadata to the coordination layer.
+  ## verifyProof is synchronous (it overrides a sync base method), so this runs
+  ## as a tracked background future rather than a fire-and-forget asyncSpawn.
+  (await sp.publishCallback.get()(sp.config.proofMetadataContentTopic, data)).isOkOr:
+    warn "Failed to broadcast proof metadata", error = error
 
 {.push raises: [], gcsafe.}
 
@@ -615,7 +636,11 @@ method verifyProof*(
       epoch: proof.epoch,
     )
     let data = broadcast.toBytes()
-    asyncSpawn sp.publishCallback.get()(sp.config.proofMetadataContentTopic, data)
+    # verifyProof is synchronous, so track the background broadcast future
+    # (pruning finished ones) rather than firing an untracked asyncSpawn;
+    # stop() cancels any that are still in flight.
+    sp.pendingBroadcasts.keepItIf(not it.finished)
+    sp.pendingBroadcasts.add(sp.broadcastProofMetadata(data))
 
   debug "Proof verified successfully",
     epoch = epochToUint64(proof.epoch),
