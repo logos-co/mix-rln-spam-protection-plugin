@@ -585,7 +585,7 @@ suite "Spam Detection and Secret Recovery":
     config.userMessageLimit = int(TestUserMessageLimit)
 
     # Create spam protection instance
-    let spResult = newMixRlnSpamProtection(config)
+    let spResult = MixRlnSpamProtection.new(config)
     check spResult.isOk
     let sp = spResult.get()
 
@@ -755,20 +755,20 @@ suite "Epoch Change Notification":
   test "epochDurationSeconds returns configured value":
     var cfg = defaultConfig()
     cfg.epochDurationSeconds = 15.0
-    let sp = newMixRlnSpamProtection(cfg)
+    let sp = MixRlnSpamProtection.new(cfg)
     check sp.isOk
     check sp.get().epochDurationSeconds() == 15.0
 
   test "rateLimitBudget returns configured userMessageLimit":
     var cfg = defaultConfig()
     cfg.userMessageLimit = 50
-    let sp = newMixRlnSpamProtection(cfg)
+    let sp = MixRlnSpamProtection.new(cfg)
     check sp.isOk
     check sp.get().rateLimitBudget() == 50
 
   test "registered epoch change callback fires on generateProof":
     let config = defaultConfig()
-    let sp = newMixRlnSpamProtection(config)
+    let sp = MixRlnSpamProtection.new(config)
     check sp.isOk
     let plugin = sp.get()
 
@@ -798,7 +798,7 @@ suite "Epoch Change Notification":
     # boundary on its own.
     var cfg = defaultConfig()
     cfg.epochDurationSeconds = 1.0
-    let sp = newMixRlnSpamProtection(cfg)
+    let sp = MixRlnSpamProtection.new(cfg)
     check sp.isOk
     let plugin = sp.get()
 
