@@ -16,20 +16,18 @@ requires "secp256k1 >= 0.5.0"
 requires "json_serialization >= 0.2.0"
 
 # nim-libp2p — used directly for protobuf/minprotobuf and varint. Pinned to
-# the same commit nim-libp2p-mix uses so the diamond dep resolves to a single
-# libp2p source. c43199378 is the release/v2.0.0 tip (3 patch commits past
-# the v2.0.0 bump). SHA-pinned because vacp2p/nim-libp2p has not yet
-# published a v2.0.0 git tag.
-requires "https://github.com/vacp2p/nim-libp2p.git#c43199378f46d0aaf61be1cad1ee1d63e8f665d6"
+# the v2.1.4 release tag, matching the `libp2p == 2.1.4` requirement in
+# nim-libp2p-mix so the diamond dep resolves to a single libp2p source.
+# Now that vacp2p/nim-libp2p publishes release tags, this is a version
+# requirement rather than a SHA pin (see issue #8).
+requires "libp2p == 2.1.4"
 
 # libp2p_mix — extracted into its own repo; previously libp2p/protocols/mix.
-# Tip of experiment/drop-nimble-lock (currently PR #14, stacked on top of
-# chore/bump-libp2p-v2.0.0). Carries the v2.0.0 bump + sink overrides +
-# AddressConfidence.Infinite + the deeper move-semantics propagation +
-# the lockfile-as-build-artefact cleanup. Pinned to the PR HEAD until the
-# stack lands on master; waku.nimble pins the same SHA to keep the diamond
-# dep collapsed to one libp2p_mix source.
-requires "https://github.com/logos-co/nim-libp2p-mix.git#50c4ab4fa788a33eb12a0a2cecaa708873352b58"
+# Pinned to master tip, which carries the libp2p v2.1.4 bump (#23) and the
+# LIONESS wide-block payload encryption (#30, LIP-183). Master requires
+# `libp2p == 2.1.4`, keeping the diamond dep collapsed to one libp2p source;
+# waku.nimble should pin the same SHA.
+requires "https://github.com/logos-co/nim-libp2p-mix.git#c387ca67cf477dc53ec6228027c45d8eda067917"
 
 # Tasks
 task test, "Run tests":
