@@ -264,6 +264,64 @@ suite "Nullifier Log":
     check not result1.isSpam
     check not result2.isSpam
 
+  test "Entries outside the acceptance window are dropped":
+    # Only the background sweep removes entries, so the log has to be running.
+    let nl = newNullifierLog(cleanupIntervalSecs = 1.0)
+    nl.start()
+
+    # Two offsets inside the acceptance window, two outside. None sits where a
+    # single epoch tick during the sleep would move it across the edge.
+    let
+      curEpoch = currentEpoch()
+      curEpochNum = int64(epochToUint64(curEpoch))
+      offsets = [-MaxEpochGap + 1, MaxEpochGap, -MaxEpochGap - 1, MaxEpochGap + 2]
+
+    var entries: seq[ProofMetadata] = @[]
+    for tag, offset in offsets:
+      var metadata: ProofMetadata
+      metadata.epoch =
+        calcEpoch(float64(curEpochNum + int64(offset)) * EpochDurationSeconds)
+      for i in 0 ..< metadata.nullifier.len:
+        metadata.nullifier[i] = byte(i)
+        metadata.shareX[i] = byte(i + 1)
+        metadata.shareY[i] = byte(i + 2)
+        metadata.externalNullifier[i] = byte(i + 3)
+      metadata.nullifier[0] = byte(200 + tag)  # Distinct entry per offset
+      metadata.externalNullifier[0] = byte(200 + tag)
+      entries.add(metadata)
+
+    # The first two sit inside the window, the last two just outside it
+    check isEpochValid(entries[0].epoch, curEpoch)
+    check isEpochValid(entries[1].epoch, curEpoch)
+    check not isEpochValid(entries[2].epoch, curEpoch)
+    check not isEpochValid(entries[3].epoch, curEpoch)
+
+    for metadata in entries:
+      let result = nl.checkAndInsert(metadata)
+      check not result.isSpam
+
+    # Sleep > 1 cleanup interval so at least one sweep must have run.
+    waitFor sleepAsync(1500.milliseconds)
+
+    # Epoch still accepted, so the entry is kept and a conflict = SPAM
+    for i in 0 .. 1:
+      var conflict = entries[i]
+      conflict.shareX[0] = 100  # Different share
+
+      let result = nl.checkAndInsert(conflict)
+      check result.isSpam
+      check result.conflictingEntry.isSome
+
+    # Epoch no longer accepted, so the entry is gone and the conflict is missed
+    for i in 2 .. 3:
+      var conflict = entries[i]
+      conflict.shareX[0] = 100
+
+      let result = nl.checkAndInsert(conflict)
+      check not result.isSpam
+
+    waitFor nl.stop()
+
 # =============================================================================
 # TREE SERIALIZATION FORMAT TESTS
 # =============================================================================

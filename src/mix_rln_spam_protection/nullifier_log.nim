@@ -8,7 +8,6 @@
 ## when a member sends more than their allowed messages within an epoch.
 
 import std/[tables, options]
-import std/times as stdtimes
 import chronos
 import results
 import chronicles
@@ -25,7 +24,6 @@ type
   # Entry in the nullifier log
   NullifierEntry* = object
     metadata*: ProofMetadata
-    timestamp*: stdtimes.Time
 
   # Per-epoch nullifier tracking
   EpochLog* = Table[Nullifier, seq[NullifierEntry]]
@@ -39,27 +37,23 @@ type
   NullifierLog* = ref object ## Log tracking nullifiers per epoch for spam detection.
     log: Table[ExternalNullifier, EpochLog]
     cleanupInterval: chronos.Duration
-    maxEpochAgeSecs: int # Store as seconds for easy comparison with times.Duration
     cleanupTask: Future[void]
     running: bool
 
 proc newNullifierLog*(
-    cleanupIntervalSecs: float = NullifierLogCleanupIntervalSeconds.float,
-    maxEpochAgeSecs: float =
-      (MaxEpochGap.float * EpochDurationSeconds + EpochDurationSeconds),
+    cleanupIntervalSecs: float = NullifierLogCleanupIntervalSeconds.float
 ): NullifierLog =
   ## Create a new nullifier log.
   NullifierLog(
     log: initTable[ExternalNullifier, EpochLog](),
     cleanupInterval: chronos.seconds(int(cleanupIntervalSecs)),
-    maxEpochAgeSecs: int(maxEpochAgeSecs),
     cleanupTask: nil,
     running: false,
   )
 
 proc cleanup(nl: NullifierLog) =
-  ## Remove expired entries from the log.
-  let now = stdtimes.getTime()
+  ## Remove entries whose epoch is no longer accepted.
+  let curEpoch = currentEpoch()
   var expiredExternalNullifiers: seq[ExternalNullifier] = @[]
 
   for extNullifier, epochLog in nl.log:
@@ -69,8 +63,7 @@ proc cleanup(nl: NullifierLog) =
       # Check if all entries for this nullifier are expired
       var allExpired = true
       for entry in entries:
-        let ageSecs = (now - entry.timestamp).inSeconds
-        if ageSecs < nl.maxEpochAgeSecs:
+        if isEpochValid(entry.metadata.epoch, curEpoch):
           allExpired = false
           break
 
@@ -167,7 +160,7 @@ proc checkAndInsert*(
       return
 
   # Not spam or duplicate, insert the entry
-  let entry = NullifierEntry(metadata: metadata, timestamp: stdtimes.getTime())
+  let entry = NullifierEntry(metadata: metadata)
 
   if not nl.log[extNullifier].hasKey(nullifier):
     nl.log[extNullifier][nullifier] = @[]
@@ -186,6 +179,7 @@ proc handleNetworkMetadata*(
     shareX: broadcast.shareX,
     shareY: broadcast.shareY,
     externalNullifier: broadcast.externalNullifier,
+    epoch: broadcast.epoch,
   )
 
   nl.checkAndInsert(metadata)

@@ -604,6 +604,7 @@ method verifyProof*(
     shareX: proof.shareX,
     shareY: proof.shareY,
     externalNullifier: extNullifier,
+    epoch: proof.epoch,
   )
 
   let spamResult =
