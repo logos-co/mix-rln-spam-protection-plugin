@@ -42,6 +42,12 @@ const
 
 # Test helpers
 
+proc mkEpoch(v: uint64): Epoch =
+  ## Build an epoch holding `v` in the first 8 bytes, little-endian.
+  result = default(Epoch)
+  for i in 0 ..< 8:
+    result[i] = byte((v shr (8 * i)) and 0xFF)
+
 proc valid(x: openArray[byte]): bool =
   ## Check that a byte array is valid (not empty and correct length)
   if x.len != 32:
@@ -96,6 +102,48 @@ suite "Constants":
     outsideGap[2] = byte((outsideGapNum shr 16) and 0xFF)
     outsideGap[3] = byte((outsideGapNum shr 24) and 0xFF)
     check not isEpochValid(outsideGap, current)
+
+  test "Epoch validity rejects out-of-int64-range epochs without raising":
+    # Epochs are attacker-controlled and span the full uint64 range. Anything
+    # with the eighth byte >= 0x80 used to raise RangeDefect on conversion.
+    let current = mkEpoch(175_000_000'u64)
+
+    # Honest nearby epoch still validates.
+    check isEpochValid(mkEpoch(174_999_998'u64), current)
+
+    var topByteSet: Epoch
+    topByteSet[7] = 0xFF
+    check not isEpochValid(topByteSet, current)
+
+    check not isEpochValid(mkEpoch(0xFFFFFFFFFFFFFFFF'u64), current)
+    check not isEpochValid(mkEpoch(0x8000000000000000'u64), current)
+
+    # Current epoch itself out of int64 range, message epoch small.
+    check not isEpochValid(current, mkEpoch(0x8000000000000000'u64))
+
+  test "Epoch validity gap boundary":
+    let curNum = 175_000_000'u64
+    let current = mkEpoch(curNum)
+
+    # Just inside the gap, on both sides.
+    check isEpochValid(mkEpoch(curNum - uint64(MaxEpochGap)), current)
+    check isEpochValid(mkEpoch(curNum + uint64(MaxEpochGap)), current)
+
+    # Just outside the gap, on both sides.
+    check not isEpochValid(mkEpoch(curNum - uint64(MaxEpochGap) - 1), current)
+    check not isEpochValid(mkEpoch(curNum + uint64(MaxEpochGap) + 1), current)
+
+    # A negative gap accepts nothing, not even an exact match.
+    check not isEpochValid(current, current, -1)
+
+  test "Epoch diff saturates instead of raising":
+    let zero = mkEpoch(0'u64)
+    let maxEpoch = mkEpoch(0xFFFFFFFFFFFFFFFF'u64)
+
+    check epochDiff(maxEpoch, zero) == high(int64)
+    check epochDiff(zero, maxEpoch) == low(int64)
+    check epochDiff(mkEpoch(10'u64), mkEpoch(4'u64)) == 6'i64
+    check epochDiff(mkEpoch(4'u64), mkEpoch(10'u64)) == -6'i64
 
 # =============================================================================
 # TYPE SERIALIZATION TESTS
