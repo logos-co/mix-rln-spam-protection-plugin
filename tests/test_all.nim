@@ -265,19 +265,16 @@ suite "Nullifier Log":
     check not result2.isSpam
 
   test "Entries outside the acceptance window are dropped":
-    # Only the background sweep removes entries, so the log has to be running.
-    let nl = newNullifierLog(cleanupIntervalSecs = 1.0)
-    nl.start()
+    let nl = newNullifierLog()
 
-    # Two offsets inside the acceptance window, two outside. None sits where a
-    # single epoch tick during the sleep would move it across the edge.
+    # The two window edges, then one epoch past each edge
     let
       curEpoch = currentEpoch()
       curEpochNum = int64(epochToUint64(curEpoch))
-      offsets = [-MaxEpochGap + 1, MaxEpochGap, -MaxEpochGap - 1, MaxEpochGap + 2]
+      offsets = [-MaxEpochGap, MaxEpochGap, -MaxEpochGap - 1, MaxEpochGap + 1]
 
     var entries: seq[ProofMetadata] = @[]
-    for tag, offset in offsets:
+    for offset in offsets:
       var metadata: ProofMetadata
       metadata.epoch =
         calcEpoch(float64(curEpochNum + int64(offset)) * EpochDurationSeconds)
@@ -286,8 +283,6 @@ suite "Nullifier Log":
         metadata.shareX[i] = byte(i + 1)
         metadata.shareY[i] = byte(i + 2)
         metadata.externalNullifier[i] = byte(i + 3)
-      metadata.nullifier[0] = byte(200 + tag)  # Distinct entry per offset
-      metadata.externalNullifier[0] = byte(200 + tag)
       entries.add(metadata)
 
     # The first two sit inside the window, the last two just outside it
@@ -300,8 +295,7 @@ suite "Nullifier Log":
       let result = nl.checkAndInsert(metadata)
       check not result.isSpam
 
-    # Sleep > 1 cleanup interval so at least one sweep must have run.
-    waitFor sleepAsync(1500.milliseconds)
+    nl.prune(curEpoch, MaxEpochGap)
 
     # Epoch still accepted, so the entry is kept and a conflict = SPAM
     for i in 0 .. 1:
@@ -319,8 +313,6 @@ suite "Nullifier Log":
 
       let result = nl.checkAndInsert(conflict)
       check not result.isSpam
-
-    waitFor nl.stop()
 
 # =============================================================================
 # TREE SERIALIZATION FORMAT TESTS

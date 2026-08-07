@@ -48,10 +48,6 @@ const
   MixRlnIdentifier* = "mix-rln-spam-protection/v1"
     ## Application-specific RLN identifier to prevent proof reuse across applications.
 
-  # Cleanup intervals
-  NullifierLogCleanupIntervalSeconds* = 60
-    ## How often to clean up expired entries from the nullifier log.
-
   # File paths (defaults)
   DefaultTreePath* = "rln_tree.db" ## Default path for persisting the Merkle tree.
 

@@ -8,12 +8,9 @@
 ## when a member sends more than their allowed messages within an epoch.
 
 import std/[tables, options]
-import chronos
-import results
 import chronicles
 
 import ./types
-import ./constants
 
 export types
 
@@ -35,85 +32,30 @@ type
     conflictingEntry*: Option[NullifierEntry]
 
   NullifierLog* = ref object ## Log tracking nullifiers per epoch for spam detection.
-    log: Table[ExternalNullifier, EpochLog]
-    cleanupInterval: chronos.Duration
-    cleanupTask: Future[void]
-    running: bool
+    log: Table[Epoch, EpochLog]
 
-proc newNullifierLog*(
-    cleanupIntervalSecs: float = NullifierLogCleanupIntervalSeconds.float
-): NullifierLog =
+proc newNullifierLog*(): NullifierLog =
   ## Create a new nullifier log.
-  NullifierLog(
-    log: initTable[ExternalNullifier, EpochLog](),
-    cleanupInterval: chronos.seconds(int(cleanupIntervalSecs)),
-    cleanupTask: nil,
-    running: false,
-  )
+  NullifierLog(log: initTable[Epoch, EpochLog]())
 
-proc cleanup(nl: NullifierLog) =
-  ## Remove entries whose epoch is no longer accepted.
-  let curEpoch = currentEpoch()
-  var expiredExternalNullifiers: seq[ExternalNullifier] = @[]
+proc prune*(nl: NullifierLog, curEpoch: Epoch, maxEpochGap: int) {.raises: [].} =
+  ## Remove entries whose epoch falls outside the window defined by `curEpoch`
+  ## and `maxEpochGap`. Pass the same window used when verifying proofs, or
+  ## entries are dropped while proofs carrying their epoch are still accepted.
+  var expiredEpochs: seq[Epoch] = @[]
 
-  for extNullifier, epochLog in nl.log:
-    var expiredNullifiers: seq[Nullifier] = @[]
+  # Collect first: deleting while iterating the table is unsafe
+  for epoch in nl.log.keys:
+    if not isEpochValid(epoch, curEpoch, maxEpochGap):
+      expiredEpochs.add(epoch)
 
-    for nullifier, entries in epochLog:
-      # Check if all entries for this nullifier are expired
-      var allExpired = true
-      for entry in entries:
-        if isEpochValid(entry.metadata.epoch, curEpoch):
-          allExpired = false
-          break
+  # Remove each expired epoch and everything recorded under it
+  for epoch in expiredEpochs:
+    nl.log.del(epoch)
 
-      if allExpired:
-        expiredNullifiers.add(nullifier)
-
-    # Remove expired nullifiers from this epoch
-    for nullifier in expiredNullifiers:
-      nl.log[extNullifier].del(nullifier)
-
-    # Check if the entire epoch log is empty
-    if nl.log[extNullifier].len == 0:
-      expiredExternalNullifiers.add(extNullifier)
-
-  # Remove empty epoch logs
-  for extNullifier in expiredExternalNullifiers:
-    nl.log.del(extNullifier)
-
-  if expiredExternalNullifiers.len > 0:
-    debug "Nullifier log cleanup",
-      removedExternalNullifiers = expiredExternalNullifiers.len,
-      remainingExternalNullifiers = nl.log.len
-
-proc cleanupLoop(nl: NullifierLog) {.async.} =
-  ## Background task for periodic cleanup.
-  while nl.running:
-    await sleepAsync(nl.cleanupInterval)
-    if nl.running:
-      nl.cleanup()
-
-proc start*(nl: NullifierLog) =
-  ## Start the nullifier log cleanup task.
-  if nl.running:
-    return
-
-  nl.running = true
-  nl.cleanupTask = nl.cleanupLoop()
-  info "Nullifier log started"
-
-proc stop*(nl: NullifierLog) {.async.} =
-  ## Stop the nullifier log cleanup task.
-  if not nl.running:
-    return
-
-  nl.running = false
-  if nl.cleanupTask != nil:
-    await nl.cleanupTask.cancelAndWait()
-    nl.cleanupTask = nil
-
-  info "Nullifier log stopped"
+  if expiredEpochs.len > 0:
+    debug "Nullifier log pruned",
+      removedEpochs = expiredEpochs.len, remainingEpochs = nl.log.len
 
 proc checkAndInsert*(
     nl: NullifierLog, metadata: ProofMetadata
@@ -129,16 +71,16 @@ proc checkAndInsert*(
     isSpam: false, isDuplicate: false, conflictingEntry: none(NullifierEntry)
   )
 
-  let extNullifier = metadata.externalNullifier
+  let epoch = metadata.epoch
   let nullifier = metadata.nullifier
 
   # Ensure epoch log exists
-  if not nl.log.hasKey(extNullifier):
-    nl.log[extNullifier] = initTable[Nullifier, seq[NullifierEntry]]()
+  if not nl.log.hasKey(epoch):
+    nl.log[epoch] = initTable[Nullifier, seq[NullifierEntry]]()
 
   # Check if we have entries for this nullifier
-  if nl.log[extNullifier].hasKey(nullifier):
-    let existingEntries = nl.log[extNullifier][nullifier]
+  if nl.log[epoch].hasKey(nullifier):
+    let existingEntries = nl.log[epoch][nullifier]
 
     for entry in existingEntries:
       # Check if exact duplicate (same shares)
@@ -162,10 +104,10 @@ proc checkAndInsert*(
   # Not spam or duplicate, insert the entry
   let entry = NullifierEntry(metadata: metadata)
 
-  if not nl.log[extNullifier].hasKey(nullifier):
-    nl.log[extNullifier][nullifier] = @[]
+  if not nl.log[epoch].hasKey(nullifier):
+    nl.log[epoch][nullifier] = @[]
 
-  nl.log[extNullifier][nullifier].add(entry)
+  nl.log[epoch][nullifier].add(entry)
   debug "Nullifier entry added", nullifier = nullifier
 
 # Handle incoming proof metadata from network coordination
