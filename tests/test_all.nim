@@ -146,6 +146,32 @@ suite "Constants":
     check epochDiff(mkEpoch(4'u64), mkEpoch(10'u64)) == -6'i64
 
 # =============================================================================
+# BYTE UTILITY TESTS
+# =============================================================================
+
+suite "Byte Utilities":
+  test "readUint64LE rejects reads that would run past the buffer":
+    var buf = newSeq[byte](12)
+    for i in 0 ..< buf.len:
+      buf[i] = byte(i + 1)
+
+    let first = buf.readUint64LE(0)
+    check first.isOk
+    check first.get() == 0x0807060504030201'u64
+
+    # Last offset that still leaves 8 bytes.
+    check buf.readUint64LE(4).isOk
+    check buf.readUint64LE(5).isErr
+
+    check buf.readUint64LE(-1).isErr
+
+    let short4 = newSeq[byte](4)
+    check short4.readUint64LE(0).isErr
+
+    let empty: seq[byte] = @[]
+    check empty.readUint64LE(0).isErr
+
+# =============================================================================
 # TYPE SERIALIZATION TESTS
 # =============================================================================
 
@@ -919,7 +945,7 @@ suite "Partial Proof Cache and Root Tracking":
     overflowing[7] = 0x02 # 2^57 members
     check gm.loadTreeSnapshot(overflowing).isErr
 
-    # A truncated header must not read past the buffer either.
+    # A short buffer is caught by the header-length guard, ahead of any read.
     check gm.loadTreeSnapshot(newSeq[byte](12)).isErr
 
 suite "Epoch Change Notification":
