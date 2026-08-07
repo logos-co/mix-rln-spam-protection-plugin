@@ -834,11 +834,19 @@ proc loadTreeSnapshot*(gm: OffchainGroupManager, data: seq[byte]): RlnResult[voi
   var offset = 0
 
   # Read header
-  let memberCount = data.readUint64LE(offset)
+  let memberCount = data.readUint64LE(offset).valueOr:
+    return err("Invalid snapshot: " & error)
   offset += Uint64ByteSize
 
-  let nextIndex = data.readUint64LE(offset)
+  let nextIndex = data.readUint64LE(offset).valueOr:
+    return err("Invalid snapshot: " & error)
   offset += Uint64ByteSize
+
+  # member_count is untrusted and spans the full uint64 range, so bound it
+  # against the data length before it reaches the int conversion below.
+  let maxMembers = uint64((data.len - SnapshotHeaderSize) div SnapshotMemberSize)
+  if memberCount > maxMembers:
+    return err("Invalid snapshot: member count too large: " & $memberCount)
 
   # Validate total size matches expected
   let expectedSize = SnapshotHeaderSize + int(memberCount) * SnapshotMemberSize
@@ -866,11 +874,14 @@ proc loadTreeSnapshot*(gm: OffchainGroupManager, data: seq[byte]): RlnResult[voi
     offset += HashByteSize
 
     # Read index
-    let index = MembershipIndex(data.readUint64LE(offset))
+    let rawIndex = data.readUint64LE(offset).valueOr:
+      return err("Invalid snapshot: " & error)
+    let index = MembershipIndex(rawIndex)
     offset += Uint64ByteSize
 
     # Read userMessageLimit
-    let userMessageLimit = data.readUint64LE(offset)
+    let userMessageLimit = data.readUint64LE(offset).valueOr:
+      return err("Invalid snapshot: " & error)
     offset += Uint64ByteSize
 
     # Compute rate commitment for the RLN tree using the stored userMessageLimit

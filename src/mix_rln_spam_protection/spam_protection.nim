@@ -671,6 +671,16 @@ proc handleProofMetadata*(sp: MixRlnSpamProtection, data: seq[byte]): RlnResult[
   let broadcast = ProofMetadataBroadcast.decode(data).valueOr:
     return err("Failed to decode proof metadata: " & $error)
 
+  # The broadcast is unauthenticated gossip and nothing downstream validates
+  # the epoch, so only admit epochs verifyProof itself would accept.
+  let curEpoch = currentEpoch(sp.config.epochDurationSeconds)
+  if not isEpochValid(broadcast.epoch, curEpoch, sp.config.maxEpochGap):
+    return err(
+      "Proof metadata epoch out of range: epoch=" & $epochToUint64(broadcast.epoch) &
+        ", currentEpoch=" & $epochToUint64(curEpoch) & ", maxGap=" &
+        $sp.config.maxEpochGap
+    )
+
   let spamResult =
     try:
       sp.nullifierLog.handleNetworkMetadata(broadcast)

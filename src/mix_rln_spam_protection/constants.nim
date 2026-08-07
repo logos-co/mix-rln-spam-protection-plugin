@@ -9,6 +9,9 @@ const
   MerkleTreeDepth* = 20
     ## Depth of the Merkle tree for membership. Supports 2^20 (~1M) members.
 
+  MerkleTreeCapacity* = 1'u64 shl MerkleTreeDepth
+    ## Number of leaves the Merkle tree can hold. Valid indices are 0 ..< this.
+
   # Cryptographic sizes
   HashByteSize* = 32 ## Size of hash outputs (Poseidon, Keccak256) in bytes.
 

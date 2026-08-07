@@ -157,7 +157,8 @@ suite "Type Serialization":
       proof.proof[i] = byte(i mod 256)
     for i in 0 ..< proof.merkleRoot.len:
       proof.merkleRoot[i] = byte((i + 1) mod 256)
-    for i in 0 ..< proof.epoch.len:
+    # Epoch number lives in the low 8 bytes; the tail stays zero-padded.
+    for i in 0 ..< Uint64ByteSize:
       proof.epoch[i] = byte((i + 2) mod 256)
     for i in 0 ..< proof.shareX.len:
       proof.shareX[i] = byte((i + 3) mod 256)
@@ -212,7 +213,8 @@ suite "Type Serialization":
       broadcast.shareY[i] = byte(i + 2)
     for i in 0 ..< broadcast.externalNullifier.len:
       broadcast.externalNullifier[i] = byte(i + 3)
-    for i in 0 ..< broadcast.epoch.len:
+    # Epoch number lives in the low 8 bytes; the tail stays zero-padded.
+    for i in 0 ..< Uint64ByteSize:
       broadcast.epoch[i] = byte(i + 4)
 
     # Serialize using protobuf
@@ -229,6 +231,29 @@ suite "Type Serialization":
     check broadcast.shareY == broadcast2.shareY
     check broadcast.externalNullifier == broadcast2.externalNullifier
     check broadcast.epoch == broadcast2.epoch
+
+  test "decode rejects a non-canonical epoch":
+    # calcEpoch zero-pads bytes 8..31, so a non-zero tail is a second encoding
+    # of the same epoch number and must not be accepted.
+    var proof: RateLimitProof
+    proof.epoch[HashByteSize - 1] = 1
+    check RateLimitProof.decode(proof.toBytes()).isErr
+
+    var broadcast: ProofMetadataBroadcast
+    broadcast.epoch[Uint64ByteSize] = 1
+    check ProofMetadataBroadcast.decode(broadcast.toBytes()).isErr
+
+  test "decode rejects a membership index beyond tree capacity":
+    var update: MembershipUpdate
+    update.action = MembershipAction.Add
+    update.index = MerkleTreeCapacity
+    check MembershipUpdate.decode(update.toBytes()).isErr
+
+    update.index = high(uint64)
+    check MembershipUpdate.decode(update.toBytes()).isErr
+
+    update.index = MerkleTreeCapacity - 1
+    check MembershipUpdate.decode(update.toBytes()).isOk
 
 # =============================================================================
 # NULLIFIER LOG TESTS
@@ -717,6 +742,34 @@ suite "Spam Detection and Secret Recovery":
 
     echo "  ✓ Full spam protection flow completed successfully"
 
+  test "Proof metadata with out-of-window epoch is rejected at ingest":
+    let spResult = MixRlnSpamProtection.new(defaultConfig())
+    check spResult.isOk
+    let sp = spResult.get()
+
+    var broadcast: ProofMetadataBroadcast
+    for i in 0 ..< HashByteSize:
+      broadcast.nullifier[i] = byte(i)
+      broadcast.shareX[i] = byte(i + 1)
+      broadcast.shareY[i] = byte(i + 2)
+      broadcast.externalNullifier[i] = byte(i + 3)
+
+    let curEpochNum = int64(epochToUint64(currentEpoch()))
+
+    # Current epoch is accepted. An epoch tick between here and the internal
+    # currentEpoch() call moves the offset to -1, which is still in-window.
+    broadcast.epoch = calcEpoch(float64(curEpochNum) * EpochDurationSeconds)
+    check sp.handleProofMetadata(broadcast.toBytes()).isOk
+
+    # Two epochs past either window edge stays out-of-window across a tick.
+    broadcast.epoch =
+      calcEpoch(float64(curEpochNum - int64(MaxEpochGap) - 2) * EpochDurationSeconds)
+    check sp.handleProofMetadata(broadcast.toBytes()).isErr
+
+    broadcast.epoch =
+      calcEpoch(float64(curEpochNum + int64(MaxEpochGap) + 2) * EpochDurationSeconds)
+    check sp.handleProofMetadata(broadcast.toBytes()).isErr
+
 suite "Partial Proof Cache and Root Tracking":
   test "Partial proof cache stores Merkle path and finishes valid proofs":
     let rlnInstance = newRLNInstance()
@@ -848,6 +901,26 @@ suite "Partial Proof Cache and Root Tracking":
 
     check not targetGm.validateRoot(emptyRoot.get())
     check targetGm.validateRoot(snapshotRoot.get())
+
+  test "Snapshot with an out-of-range member count is rejected":
+    let rln = newRLNInstance()
+    check rln.isOk
+    let gm = newOffchainGroupManager(rln.get(), userMessageLimit = TestUserMessageLimit)
+    check (waitFor gm.init()).isOk
+
+    # member_count above high(int64) used to reach int(memberCount) and raise
+    # RangeDefect; values above 2^57 overflowed the multiply instead.
+    var hostile = newSeq[byte](16)
+    for i in 0 ..< 8:
+      hostile[i] = 0xFF
+    check gm.loadTreeSnapshot(hostile).isErr
+
+    var overflowing = newSeq[byte](16)
+    overflowing[7] = 0x02 # 2^57 members
+    check gm.loadTreeSnapshot(overflowing).isErr
+
+    # A truncated header must not read past the buffer either.
+    check gm.loadTreeSnapshot(newSeq[byte](12)).isErr
 
 suite "Epoch Change Notification":
   test "epochDurationSeconds returns configured value":
