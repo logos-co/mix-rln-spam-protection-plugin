@@ -32,10 +32,10 @@ export libp2p_spam.SpamProtection
 logScope:
   topics = "mix-rln-spam-protection"
 
-declareCounter mix_rln_proof_verifications_total,
+declarePublicCounter mix_rln_proof_verifications_total,
   "Total RLN proof verifications by outcome (valid, invalid, error)",
   labels = ["outcome"]
-declareCounter mix_rln_messages_rejected_total,
+declarePublicCounter mix_rln_messages_rejected_total,
   "Messages rejected by RLN spam protection, by reason", labels = ["reason"]
 
 type

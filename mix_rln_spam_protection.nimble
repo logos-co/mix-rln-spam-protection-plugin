@@ -33,8 +33,11 @@ requires "https://github.com/logos-co/nim-libp2p-mix.git#c387ca67cf477dc53ec6228
 # Tasks
 task test, "Run tests":
   # Requires librln.a in current directory or set LIBRLN_PATH env var
+  # -d:metrics enables live metric collectors so the metrics suite runs;
+  # -d:metricsTest silences deprecation warnings on nim-metrics test helpers
   let librlnPath = getEnv("LIBRLN_PATH", "librln.a")
-  exec "nim c -r --passL:" & librlnPath & " --passL:-lm tests/test_all.nim"
+  exec "nim c -r -d:metrics -d:metricsTest --passL:" & librlnPath &
+    " --passL:-lm tests/test_all.nim"
 
 task docs, "Generate documentation":
   exec "nim doc --project --index:on --outdir:docs src/mix_rln_spam_protection.nim"
