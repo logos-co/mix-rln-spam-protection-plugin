@@ -818,6 +818,131 @@ suite "Epoch Change Notification":
 
     waitFor plugin.stop()
 
+# =============================================================================
+# METRICS TESTS
+# =============================================================================
+
+when defined(metrics):
+  import metrics
+
+  # Labeled children only exist after the first increment/observe, in which
+  # case value/valueByName raise; treat "never observed" as zero.
+  proc labeledValue(c: Counter, labels: openArray[string]): float64 =
+    try:
+      c.value(labels)
+    except ValueError:
+      0.0
+
+  proc histCount(h: Histogram, series: string, labels: openArray[string] = []): float64 =
+    try:
+      h.valueByName(series, labels)
+    except ValueError:
+      0.0
+
+  proc totalGenerations(): float64 =
+    histCount(mix_rln_proof_generation_duration_seconds,
+      "mix_rln_proof_generation_duration_seconds_count", ["cached"]) +
+    histCount(mix_rln_proof_generation_duration_seconds,
+      "mix_rln_proof_generation_duration_seconds_count", ["full"])
+
+  proc totalGenFailures(): float64 =
+    labeledValue(mix_rln_proof_generation_failures_total, ["not_ready"]) +
+    labeledValue(mix_rln_proof_generation_failures_total, ["tree_state"]) +
+    labeledValue(mix_rln_proof_generation_failures_total, ["witness_generation"])
+
+  suite "Metrics":
+    test "metrics track proof lifecycle, rejections and group size":
+      var config = defaultConfig()
+      config.userMessageLimit = int(TestUserMessageLimit)
+
+      let sp = MixRlnSpamProtection.new(config).get()
+      check (waitFor sp.init()).isOk
+      check (waitFor sp.registerSelf()).isOk
+      check (waitFor sp.start()).isOk
+      check sp.isReady()
+
+      # Group size gauge tracks the membership table
+      check mix_rln_group_size.value() == float64(sp.getMemberCount())
+
+      let
+        genBefore = totalGenerations()
+        failuresBefore = totalGenFailures()
+        cacheBefore =
+          labeledValue(mix_rln_partial_proof_cache_total, ["hit"]) +
+          labeledValue(mix_rln_partial_proof_cache_total, ["miss"])
+
+      let bindingData = @[byte(10), 20, 30, 40, 50]
+      let proofResult = sp.generateProof(bindingData)
+      check proofResult.isOk
+      let proofBytes = proofResult.get().proof
+
+      # One successful generation: histogram observed once, cache consulted
+      # once (hit or miss), no failures recorded
+      check totalGenerations() == genBefore + 1.0
+      check labeledValue(mix_rln_partial_proof_cache_total, ["hit"]) +
+        labeledValue(mix_rln_partial_proof_cache_total, ["miss"]) == cacheBefore + 1.0
+      check totalGenFailures() == failuresBefore
+
+      let
+        validBefore = labeledValue(mix_rln_proof_verifications_total, ["valid"])
+        invalidBefore = labeledValue(mix_rln_proof_verifications_total, ["invalid"])
+        errorBefore = labeledValue(mix_rln_proof_verifications_total, ["error"])
+        duplicateBefore = labeledValue(mix_rln_messages_rejected_total, ["duplicate"])
+        staleRootBefore = labeledValue(mix_rln_messages_rejected_total, ["stale_root"])
+        verifDurBefore = histCount(mix_rln_proof_verification_duration_seconds,
+          "mix_rln_proof_verification_duration_seconds_count")
+
+      # Valid verification: outcome=valid, duration observed
+      let verifyResult = sp.verifyProof(proofBytes, bindingData)
+      check verifyResult.isOk
+      check verifyResult.get() == true
+      check labeledValue(mix_rln_proof_verifications_total, ["valid"]) ==
+        validBefore + 1.0
+      check histCount(mix_rln_proof_verification_duration_seconds,
+        "mix_rln_proof_verification_duration_seconds_count") == verifDurBefore + 1.0
+
+      # Replay of the same proof: outcome=invalid, reason=duplicate
+      let dupResult = sp.verifyProof(proofBytes, bindingData)
+      check dupResult.isOk
+      check dupResult.get() == false
+      check labeledValue(mix_rln_proof_verifications_total, ["invalid"]) ==
+        invalidBefore + 1.0
+      check labeledValue(mix_rln_messages_rejected_total, ["duplicate"]) ==
+        duplicateBefore + 1.0
+
+      # Binding data mismatch: zerokit reports the signal mismatch as a
+      # verification error, so outcome=error (not a clean invalid)
+      let wrongBinding = @[byte(99), 98, 97]
+      let mismatchResult = sp.verifyProof(proofBytes, wrongBinding)
+      check mismatchResult.isErr
+      check labeledValue(mix_rln_proof_verifications_total, ["error"]) ==
+        errorBefore + 1.0
+
+      # Undecodable proof bytes: outcome=error
+      let garbageResult = sp.verifyProof(@[byte(1), 2, 3], bindingData)
+      check garbageResult.isErr
+      check labeledValue(mix_rln_proof_verifications_total, ["error"]) ==
+        errorBefore + 2.0
+
+      # Proof verified against a different tree: root not in the valid
+      # window, reason=stale_root
+      let sp2 = MixRlnSpamProtection.new(defaultConfig()).get()
+      check (waitFor sp2.init()).isOk
+      check (waitFor sp2.registerSelf()).isOk
+      check (waitFor sp2.start()).isOk
+      let staleResult = sp2.verifyProof(proofBytes, bindingData)
+      check staleResult.isOk
+      check staleResult.get() == false
+      check labeledValue(mix_rln_messages_rejected_total, ["stale_root"]) ==
+        staleRootBefore + 1.0
+      check labeledValue(mix_rln_proof_verifications_total, ["invalid"]) ==
+        invalidBefore + 2.0
+      waitFor sp2.stop()
+
+      waitFor sp.stop()
+
+      echo "  ✓ Metrics validated against proof lifecycle"
+
 # Main test runner
 when isMainModule:
   randomize()

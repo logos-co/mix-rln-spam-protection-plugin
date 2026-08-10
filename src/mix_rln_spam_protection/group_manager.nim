@@ -29,18 +29,20 @@ export types, constants, codec
 logScope:
   topics = "mix-rln-group-manager"
 
-declareHistogram mix_rln_proof_generation_duration_seconds,
+declarePublicHistogram mix_rln_proof_generation_duration_seconds,
   "Duration of RLN proof generation in seconds", labels = ["mode"]
-declareHistogram mix_rln_proof_verification_duration_seconds,
+declarePublicHistogram mix_rln_proof_verification_duration_seconds,
   "Duration of RLN zkSNARK proof verification in seconds"
-declareCounter mix_rln_proof_generation_failures_total,
-  "Number of failed RLN proof generation attempts"
-declareCounter mix_rln_partial_proof_cache_total,
+declarePublicCounter mix_rln_proof_generation_failures_total,
+  "Failed RLN proof generation attempts (not_ready, tree_state, witness_generation)",
+  labels = ["reason"]
+declarePublicCounter mix_rln_partial_proof_cache_total,
   "Partial proof cache usage during proof generation (hit, miss, refresh)",
   labels = ["result"]
-declareCounter mix_rln_root_mismatch_total,
+declarePublicCounter mix_rln_root_mismatch_total,
   "Number of generated proofs whose Merkle root differed from the current tree root"
-declareGauge mix_rln_group_size, "Number of members in the local RLN membership tree"
+declarePublicGauge mix_rln_group_size,
+  "Number of members in the local RLN membership tree"
 
 type
   # Callback types for group manager events
@@ -242,6 +244,7 @@ method generateProof*(
 ): RlnResult[RateLimitProof] {.base.} =
   ## Generate an RLN proof for a message.
   if not gm.isReady():
+    mix_rln_proof_generation_failures_total.inc(labelValues = ["not_ready"])
     return err("Group manager not ready")
 
   let creds = gm.credentials.get()
@@ -253,16 +256,19 @@ method generateProof*(
 
   # Flush tree to ensure internal state is synced
   if not flush(gm.rlnInstance.ctx):
+    mix_rln_proof_generation_failures_total.inc(labelValues = ["tree_state"])
     return err("Failed to flush tree before proof generation")
 
   # Verify the tree has the expected rate commitment at our index
   # Tree stores rate_commitment = Poseidon(id_commitment, user_message_limit), NOT id_commitment
   let treeCommitment = gm.rlnInstance.getLeaf(index).valueOr:
+    mix_rln_proof_generation_failures_total.inc(labelValues = ["tree_state"])
     return err("Failed to get leaf at membership index: " & error)
 
   let expectedRateCommitment = computeRateCommitment(
     creds.idCommitment, gm.userMessageLimit
   ).valueOr:
+    mix_rln_proof_generation_failures_total.inc(labelValues = ["tree_state"])
     return err("Failed to compute expected rate commitment: " & error)
 
   trace "Tree state verification before proof generation",
@@ -281,6 +287,7 @@ method generateProof*(
 
   # Get current Merkle root before generating proof
   let currentRoot = gm.rlnInstance.getMerkleRoot().valueOr:
+    mix_rln_proof_generation_failures_total.inc(labelValues = ["tree_state"])
     return err("Failed to get current Merkle root: " & error)
 
   trace "Generating RLN proof",
@@ -337,7 +344,7 @@ method generateProof*(
     )
 
   if proofResult.isErr:
-    mix_rln_proof_generation_failures_total.inc()
+    mix_rln_proof_generation_failures_total.inc(labelValues = ["witness_generation"])
     error "RLN proof generation failed", error = proofResult.error
     return proofResult
 
