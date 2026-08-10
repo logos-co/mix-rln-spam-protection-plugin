@@ -17,6 +17,7 @@ import std/[tables, deques, options, hashes, sets]
 import chronos
 import results
 import chronicles
+import metrics
 
 import ./types
 import ./constants
@@ -27,6 +28,9 @@ export types, constants, codec
 
 logScope:
   topics = "mix-rln-group-manager"
+
+declareHistogram mix_rln_proof_generation_duration_seconds,
+  "Duration of RLN proof generation in seconds"
 
 type
   # Callback types for group manager events
@@ -276,6 +280,7 @@ method generateProof*(
 
   # Happy path: cached partial-proof should be available and valid most of the time.
   # On cache miss/staleness, rebuild once and retry. Fall back to full proof generation.
+  let proofGenStart = Moment.now()
   var proofResult: RlnResult[RateLimitProof] = err("partial-proof cache not used")
   var usedPartialCache = false
 
@@ -319,6 +324,10 @@ method generateProof*(
   if proofResult.isErr:
     error "RLN proof generation failed", error = proofResult.error
     return proofResult
+
+  mix_rln_proof_generation_duration_seconds.observe(
+    (Moment.now() - proofGenStart).nanoseconds.float / 1e9
+  )
 
   # Log the root that ended up in the generated proof
   let generatedProof = proofResult.get()
