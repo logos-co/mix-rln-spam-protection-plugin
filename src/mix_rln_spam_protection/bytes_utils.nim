@@ -63,14 +63,18 @@ proc fromBytesLE*(data: openArray[byte]): uint64 =
     (uint64(data[3]) shl 24) or (uint64(data[4]) shl 32) or (uint64(data[5]) shl 40) or
     (uint64(data[6]) shl 48) or (uint64(data[7]) shl 56)
 
-proc readUint64LE*(src: openArray[byte], offset: int): uint64 =
+proc readUint64LE*(src: openArray[byte], offset: int): Result[uint64, string] =
   ## Read a uint64 in little-endian format from the given offset.
-  ## Raises IndexDefect if offset + 8 exceeds src length.
-  result =
+  ## Callers may pass untrusted data, so the bounds are checked rather than
+  ## left to raise IndexDefect.
+  if offset < 0 or offset + Uint64ByteSize > src.len:
+    return err("Read would exceed bounds: offset=" & $offset & ", srcLen=" & $src.len)
+  ok(
     uint64(src[offset + 0]) or (uint64(src[offset + 1]) shl 8) or
-    (uint64(src[offset + 2]) shl 16) or (uint64(src[offset + 3]) shl 24) or
-    (uint64(src[offset + 4]) shl 32) or (uint64(src[offset + 5]) shl 40) or
-    (uint64(src[offset + 6]) shl 48) or (uint64(src[offset + 7]) shl 56)
+      (uint64(src[offset + 2]) shl 16) or (uint64(src[offset + 3]) shl 24) or
+      (uint64(src[offset + 4]) shl 32) or (uint64(src[offset + 5]) shl 40) or
+      (uint64(src[offset + 6]) shl 48) or (uint64(src[offset + 7]) shl 56)
+  )
 
 # =============================================================================
 # Hex Formatting Utilities

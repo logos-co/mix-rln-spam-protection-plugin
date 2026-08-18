@@ -28,6 +28,14 @@ import ./protobuf
 import ./types
 import ./constants
 
+proc isCanonicalEpoch(epoch: openArray[byte]): bool =
+  ## calcEpoch stores the epoch number in the first 8 bytes and zero-pads the
+  ## rest, so a non-zero tail is a second encoding of the same epoch number.
+  for i in Uint64ByteSize ..< HashByteSize:
+    if epoch[i] != 0:
+      return false
+  true
+
 # RateLimitProof encoding/decoding
 
 proc encode*(proof: RateLimitProof): ProtoBuffer =
@@ -67,6 +75,8 @@ proc decode*(T: type RateLimitProof, buffer: seq[byte]): ProtobufResult[T] =
   if not ?pb.getField(3, epoch):
     return err(ProtobufError.missingRequiredField("epoch"))
   if epoch.len != HashByteSize:
+    return err(ProtobufError.invalidLengthField("epoch"))
+  if not isCanonicalEpoch(epoch):
     return err(ProtobufError.invalidLengthField("epoch"))
   copyMem(addr proof.epoch[0], addr epoch[0], HashByteSize)
 
@@ -135,6 +145,8 @@ proc decode*(T: type MembershipUpdate, buffer: seq[byte]): ProtobufResult[T] =
   var index: uint64
   if not ?pb.getField(4, index):
     return err(ProtobufError.missingRequiredField("index"))
+  if index >= MerkleTreeCapacity:
+    return err(ProtobufError.invalidLengthField("index"))
   update.index = index
 
   ok(update)
@@ -193,6 +205,8 @@ proc decode*(T: type ProofMetadataBroadcast, buffer: seq[byte]): ProtobufResult[
   if not ?pb.getField(5, epoch):
     return err(ProtobufError.missingRequiredField("epoch"))
   if epoch.len != HashByteSize:
+    return err(ProtobufError.invalidLengthField("epoch"))
+  if not isCanonicalEpoch(epoch):
     return err(ProtobufError.invalidLengthField("epoch"))
   copyMem(addr broadcast.epoch[0], addr epoch[0], HashByteSize)
 

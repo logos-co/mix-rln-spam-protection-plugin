@@ -178,16 +178,21 @@ proc epochToUint64*(epoch: Epoch): uint64 =
   ## Convert an epoch to its numeric value (reads first 8 bytes as little-endian).
   fromBytesLE(epoch)
 
-proc epochDiff*(e1, e2: Epoch): int64 =
-  ## Calculate the difference between two epochs.
-  int64(epochToUint64(e1)) - int64(epochToUint64(e2))
-
 proc isEpochValid*(
     msgEpoch: Epoch, currentEpoch: Epoch, maxEpochGap: int = MaxEpochGap
 ): bool =
   ## Check if a message epoch is within the acceptable gap.
-  let diff = abs(epochDiff(currentEpoch, msgEpoch))
-  diff <= maxEpochGap
+  if maxEpochGap < 0:
+    return false
+  let
+    a = epochToUint64(currentEpoch)
+    b = epochToUint64(msgEpoch)
+    gap = uint64(maxEpochGap)
+  # Subtract the smaller from the larger so the difference cannot underflow.
+  if a >= b:
+    (a - b) <= gap
+  else:
+    (b - a) <= gap
 
 # =============================================================================
 # Hex Conversion Utilities

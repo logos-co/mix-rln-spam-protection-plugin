@@ -9,6 +9,9 @@ const
   MerkleTreeDepth* = 20
     ## Depth of the Merkle tree for membership. Supports 2^20 (~1M) members.
 
+  MerkleTreeCapacity* = 1'u64 shl MerkleTreeDepth
+    ## Number of leaves the Merkle tree can hold. Valid indices are 0 ..< this.
+
   # Cryptographic sizes
   HashByteSize* = 32 ## Size of hash outputs (Poseidon, Keccak256) in bytes.
 
@@ -26,9 +29,20 @@ const
     ## Duration of each epoch in seconds. Nodes can send up to
     ## UserMessageLimit messages per epoch.
 
-  MaxEpochGap* = 5
+  MaxEpochGap* = 3
     ## Maximum allowed epoch gap between message epoch and current epoch.
     ## Messages outside this window are rejected.
+    ##
+    ## Derived as ceil((S + A + D) / EpochDurationSeconds), where S is the max
+    ## clock skew between minter and verifier (20 s assumed, 2 epochs), A is
+    ## the proof age at emission (1 epoch: precomputed cover packets sit queued
+    ## up to a full epoch before the boundary purge), and D is path latency
+    ## (proof generation plus upstream forwarding delays; sub-second at the
+    ## default mean per-hop delay, absorbed in the skew slack). Revisit if the
+    ## epoch duration shrinks or per-hop delays grow to a meaningful fraction
+    ## of an epoch. Each accepted epoch carries a full UserMessageLimit
+    ## allowance, so the window multiplies burst capacity by 2*MaxEpochGap + 1
+    ## (see issue #14).
 
   UserMessageLimit* = 100 ## Maximum number of messages a member can send per epoch.
 
