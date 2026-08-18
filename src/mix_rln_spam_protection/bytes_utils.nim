@@ -15,8 +15,7 @@ import results
 
 export results
 
-type
-  BytesError* = object of CatchableError
+type BytesError* = object of CatchableError
 
 # =============================================================================
 # Little-Endian uint64 Encoding/Decoding
@@ -60,27 +59,18 @@ proc fromBytesLE*(data: openArray[byte]): uint64 =
   ## Read a uint64 from the first 8 bytes in little-endian format.
   ## Raises IndexDefect if data has fewer than 8 bytes.
   result =
-    uint64(data[0]) or
-    (uint64(data[1]) shl 8) or
-    (uint64(data[2]) shl 16) or
-    (uint64(data[3]) shl 24) or
-    (uint64(data[4]) shl 32) or
-    (uint64(data[5]) shl 40) or
-    (uint64(data[6]) shl 48) or
-    (uint64(data[7]) shl 56)
+    uint64(data[0]) or (uint64(data[1]) shl 8) or (uint64(data[2]) shl 16) or
+    (uint64(data[3]) shl 24) or (uint64(data[4]) shl 32) or (uint64(data[5]) shl 40) or
+    (uint64(data[6]) shl 48) or (uint64(data[7]) shl 56)
 
 proc readUint64LE*(src: openArray[byte], offset: int): uint64 =
   ## Read a uint64 in little-endian format from the given offset.
   ## Raises IndexDefect if offset + 8 exceeds src length.
   result =
-    uint64(src[offset + 0]) or
-    (uint64(src[offset + 1]) shl 8) or
-    (uint64(src[offset + 2]) shl 16) or
-    (uint64(src[offset + 3]) shl 24) or
-    (uint64(src[offset + 4]) shl 32) or
-    (uint64(src[offset + 5]) shl 40) or
-    (uint64(src[offset + 6]) shl 48) or
-    (uint64(src[offset + 7]) shl 56)
+    uint64(src[offset + 0]) or (uint64(src[offset + 1]) shl 8) or
+    (uint64(src[offset + 2]) shl 16) or (uint64(src[offset + 3]) shl 24) or
+    (uint64(src[offset + 4]) shl 32) or (uint64(src[offset + 5]) shl 40) or
+    (uint64(src[offset + 6]) shl 48) or (uint64(src[offset + 7]) shl 56)
 
 # =============================================================================
 # Hex Formatting Utilities
@@ -110,7 +100,9 @@ proc hexPreview*(data: openArray[byte], previewLen: int = 8): string =
 # Safe Memory Operations
 # =============================================================================
 
-proc copyTo*[N: static int](src: openArray[byte], dest: var array[N, byte]): Result[void, string] =
+proc copyTo*[N: static int](
+    src: openArray[byte], dest: var array[N, byte]
+): Result[void, string] =
   ## Safely copy bytes from a sequence to a fixed-size array.
   ## Returns error if source length doesn't match destination size.
   if src.len != N:
@@ -119,37 +111,49 @@ proc copyTo*[N: static int](src: openArray[byte], dest: var array[N, byte]): Res
     dest[i] = src[i]
   ok()
 
-proc copyTo*(src: openArray[byte], dest: var openArray[byte], destOffset: int = 0): Result[void, string] =
+proc copyTo*(
+    src: openArray[byte], dest: var openArray[byte], destOffset: int = 0
+): Result[void, string] =
   ## Safely copy bytes with bounds checking.
   ## Returns error if copy would exceed destination bounds.
   if destOffset < 0:
     return err("Invalid negative offset: " & $destOffset)
   if destOffset + src.len > dest.len:
-    return err("Copy would exceed bounds: offset=" & $destOffset &
-               ", srcLen=" & $src.len & ", destLen=" & $dest.len)
+    return err(
+      "Copy would exceed bounds: offset=" & $destOffset & ", srcLen=" & $src.len &
+        ", destLen=" & $dest.len
+    )
   for i in 0 ..< src.len:
     dest[destOffset + i] = src[i]
   ok()
 
-proc extractBytes*(src: openArray[byte], offset: int, length: int): Result[seq[byte], string] =
+proc extractBytes*(
+    src: openArray[byte], offset: int, length: int
+): Result[seq[byte], string] =
   ## Extract a slice of bytes with bounds checking.
   if offset < 0:
     return err("Invalid negative offset: " & $offset)
   if offset + length > src.len:
-    return err("Read would exceed bounds: offset=" & $offset &
-               ", length=" & $length & ", srcLen=" & $src.len)
+    return err(
+      "Read would exceed bounds: offset=" & $offset & ", length=" & $length & ", srcLen=" &
+        $src.len
+    )
   var extracted = newSeq[byte](length)
   for i in 0 ..< length:
     extracted[i] = src[offset + i]
   ok(extracted)
 
-proc extractArray*[N: static int](src: openArray[byte], offset: int): Result[array[N, byte], string] =
+proc extractArray*[N: static int](
+    src: openArray[byte], offset: int
+): Result[array[N, byte], string] =
   ## Extract a fixed-size array from bytes with bounds checking.
   if offset < 0:
     return err("Invalid negative offset: " & $offset)
   if offset + N > src.len:
-    return err("Read would exceed bounds: offset=" & $offset &
-               ", size=" & $N & ", srcLen=" & $src.len)
+    return err(
+      "Read would exceed bounds: offset=" & $offset & ", size=" & $N & ", srcLen=" &
+        $src.len
+    )
   var arr: array[N, byte]
   for i in 0 ..< N:
     arr[i] = src[offset + i]
