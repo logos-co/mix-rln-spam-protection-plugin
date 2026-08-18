@@ -251,14 +251,20 @@ suite "Type Serialization":
 
   test "decode rejects a non-canonical epoch":
     # calcEpoch zero-pads bytes 8..31, so a non-zero tail is a second encoding
-    # of the same epoch number and must not be accepted.
+    # of the same epoch number and must not be accepted. The field is the right
+    # length, so it reports InvalidFieldValue rather than InvalidLengthField.
     var proof: RateLimitProof
     proof.epoch[HashByteSize - 1] = 1
-    check RateLimitProof.decode(proof.toBytes()).isErr
+    let proofRes = RateLimitProof.decode(proof.toBytes())
+    check proofRes.isErr
+    check proofRes.error.kind == ProtobufErrorKind.InvalidFieldValue
+    check proofRes.error.field == "epoch"
 
     var broadcast: ProofMetadataBroadcast
     broadcast.epoch[Uint64ByteSize] = 1
-    check ProofMetadataBroadcast.decode(broadcast.toBytes()).isErr
+    let broadcastRes = ProofMetadataBroadcast.decode(broadcast.toBytes())
+    check broadcastRes.isErr
+    check broadcastRes.error.kind == ProtobufErrorKind.InvalidFieldValue
 
   test "decode rejects a membership index beyond tree capacity":
     var update: MembershipUpdate

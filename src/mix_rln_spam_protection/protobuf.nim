@@ -18,12 +18,13 @@ type
     DecodeFailure
     MissingRequiredField
     InvalidLengthField
+    InvalidFieldValue
 
   ProtobufError* = object
     case kind*: ProtobufErrorKind
     of DecodeFailure:
       error*: minprotobuf.ProtoError
-    of MissingRequiredField, InvalidLengthField:
+    of MissingRequiredField, InvalidLengthField, InvalidFieldValue:
       field*: string
 
   ProtobufResult*[T] = Result[T, ProtobufError]
@@ -40,6 +41,10 @@ proc missingRequiredField*(T: type ProtobufError, field: string): T =
 
 proc invalidLengthField*(T: type ProtobufError, field: string): T =
   ProtobufError(kind: ProtobufErrorKind.InvalidLengthField, field: field)
+
+proc invalidFieldValue*(T: type ProtobufError, field: string): T =
+  ## For a field of the right length whose contents are rejected.
+  ProtobufError(kind: ProtobufErrorKind.InvalidFieldValue, field: field)
 
 proc write3*(proto: var ProtoBuffer, field: int, value: auto) =
   when value is Option:
@@ -62,3 +67,5 @@ proc `$`*(err: ProtobufError): string =
     return "MissingRequiredField " & err.field
   of InvalidLengthField:
     return "InvalidLengthField " & err.field
+  of InvalidFieldValue:
+    return "InvalidFieldValue " & err.field
