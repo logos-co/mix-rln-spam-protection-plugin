@@ -136,15 +136,6 @@ suite "Constants":
     # A negative gap accepts nothing, not even an exact match.
     check not isEpochValid(current, current, -1)
 
-  test "Epoch diff saturates instead of raising":
-    let zero = mkEpoch(0'u64)
-    let maxEpoch = mkEpoch(0xFFFFFFFFFFFFFFFF'u64)
-
-    check epochDiff(maxEpoch, zero) == high(int64)
-    check epochDiff(zero, maxEpoch) == low(int64)
-    check epochDiff(mkEpoch(10'u64), mkEpoch(4'u64)) == 6'i64
-    check epochDiff(mkEpoch(4'u64), mkEpoch(10'u64)) == -6'i64
-
 # =============================================================================
 # BYTE UTILITY TESTS
 # =============================================================================

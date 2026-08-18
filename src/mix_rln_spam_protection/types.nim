@@ -178,27 +178,6 @@ proc epochToUint64*(epoch: Epoch): uint64 =
   ## Convert an epoch to its numeric value (reads first 8 bytes as little-endian).
   fromBytesLE(epoch)
 
-proc epochDiff*(e1, e2: Epoch): int64 =
-  ## Calculate the difference between two epochs, saturating at the int64
-  ## bounds. Epochs are attacker-controlled and span the full uint64 range, so
-  ## converting to int64 would raise RangeDefect for half the input space.
-  let
-    a = epochToUint64(e1)
-    b = epochToUint64(e2)
-  if a >= b:
-    let d = a - b
-    if d > uint64(high(int64)):
-      high(int64)
-    else:
-      int64(d)
-  else:
-    let d = b - a
-    # -low(int64) is not representable, so clamp the magnitude before negating.
-    if d >= uint64(high(int64)) + 1:
-      low(int64)
-    else:
-      -int64(d)
-
 proc isEpochValid*(
     msgEpoch: Epoch, currentEpoch: Epoch, maxEpochGap: int = MaxEpochGap
 ): bool =
