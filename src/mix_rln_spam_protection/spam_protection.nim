@@ -11,6 +11,7 @@ import std/[math, options, deques, times, sequtils]
 import chronos
 import results
 import chronicles
+import metrics
 import stew/endians2
 
 # Import libp2p_mix spam protection interface
@@ -30,6 +31,12 @@ export libp2p_spam.SpamProtection
 
 logScope:
   topics = "mix-rln-spam-protection"
+
+declarePublicCounter mix_rln_proof_verifications_total,
+  "Total RLN proof verifications by outcome (valid, invalid, error)",
+  labels = ["outcome"]
+declarePublicCounter mix_rln_messages_rejected_total,
+  "Messages rejected by RLN spam protection, by reason", labels = ["reason"]
 
 type
   # Configuration for the spam protection plugin
@@ -564,6 +571,14 @@ method verifyProof*(
   ## 3. zkSNARK proof verification
   ## 4. Nullifier check for spam/duplicate detection
 
+  defer:
+    if result.isErr:
+      mix_rln_proof_verifications_total.inc(labelValues = ["error"])
+    elif result.get():
+      mix_rln_proof_verifications_total.inc(labelValues = ["valid"])
+    else:
+      mix_rln_proof_verifications_total.inc(labelValues = ["invalid"])
+
   if not sp.isReady():
     return err("Plugin not ready")
 
@@ -579,11 +594,13 @@ method verifyProof*(
       proofEpoch = epochToUint64(proof.epoch),
       currentEpoch = epochToUint64(curEpoch),
       maxGap = sp.config.maxEpochGap
+    mix_rln_messages_rejected_total.inc(labelValues = ["wrong_epoch"])
     return ok(false)
 
   # Check Merkle root validity
   if not sp.groupManager.validateRoot(proof.merkleRoot):
     debug "Proof rejected: invalid Merkle root"
+    mix_rln_messages_rejected_total.inc(labelValues = ["stale_root"])
     return ok(false)
 
   # Verify the zkSNARK proof
@@ -592,6 +609,7 @@ method verifyProof*(
 
   if not isValid:
     debug "Proof rejected: invalid zkSNARK proof"
+    mix_rln_messages_rejected_total.inc(labelValues = ["invalid_proof"])
     return ok(false)
 
   # Compute external nullifier for spam checking
@@ -614,9 +632,11 @@ method verifyProof*(
 
   if spamResult.isDuplicate:
     debug "Duplicate message detected, discarding"
+    mix_rln_messages_rejected_total.inc(labelValues = ["duplicate"])
     return ok(false)
 
   if spamResult.isSpam:
+    mix_rln_messages_rejected_total.inc(labelValues = ["spam_detected"])
     warn "Spam detected!",
       nullifier = proof.nullifier.toHex(), epoch = epochToUint64(proof.epoch)
 

@@ -17,6 +17,7 @@ import std/[tables, deques, options, hashes, sets]
 import chronos
 import results
 import chronicles
+import metrics
 
 import ./types
 import ./constants
@@ -27,6 +28,21 @@ export types, constants, codec
 
 logScope:
   topics = "mix-rln-group-manager"
+
+declarePublicHistogram mix_rln_proof_generation_duration_seconds,
+  "Duration of RLN proof generation in seconds", labels = ["mode"]
+declarePublicHistogram mix_rln_proof_verification_duration_seconds,
+  "Duration of RLN zkSNARK proof verification in seconds"
+declarePublicCounter mix_rln_proof_generation_failures_total,
+  "Failed RLN proof generation attempts (not_ready, tree_state, witness_generation)",
+  labels = ["reason"]
+declarePublicCounter mix_rln_partial_proof_cache_total,
+  "Partial proof cache usage during proof generation (hit, miss, refresh)",
+  labels = ["result"]
+declarePublicCounter mix_rln_root_mismatch_total,
+  "Number of generated proofs whose Merkle root differed from the current tree root"
+declarePublicGauge mix_rln_group_size,
+  "Number of members in the local RLN membership tree"
 
 type
   # Callback types for group manager events
@@ -228,6 +244,7 @@ method generateProof*(
 ): RlnResult[RateLimitProof] {.base.} =
   ## Generate an RLN proof for a message.
   if not gm.isReady():
+    mix_rln_proof_generation_failures_total.inc(labelValues = ["not_ready"])
     return err("Group manager not ready")
 
   let creds = gm.credentials.get()
@@ -238,16 +255,19 @@ method generateProof*(
 
   # Flush tree to ensure internal state is synced
   if not flush(gm.rlnInstance.ctx):
+    mix_rln_proof_generation_failures_total.inc(labelValues = ["tree_state"])
     return err("Failed to flush tree before proof generation")
 
   # Verify the tree has the expected rate commitment at our index
   # Tree stores rate_commitment = Poseidon(id_commitment, user_message_limit), NOT id_commitment
   let treeCommitment = gm.rlnInstance.getLeaf(index).valueOr:
+    mix_rln_proof_generation_failures_total.inc(labelValues = ["tree_state"])
     return err("Failed to get leaf at membership index: " & error)
 
   let expectedRateCommitment = computeRateCommitment(
     creds.idCommitment, gm.userMessageLimit
   ).valueOr:
+    mix_rln_proof_generation_failures_total.inc(labelValues = ["tree_state"])
     return err("Failed to compute expected rate commitment: " & error)
 
   trace "Tree state verification before proof generation",
@@ -265,6 +285,7 @@ method generateProof*(
 
   # Get current Merkle root before generating proof
   let currentRoot = gm.rlnInstance.getMerkleRoot().valueOr:
+    mix_rln_proof_generation_failures_total.inc(labelValues = ["tree_state"])
     return err("Failed to get current Merkle root: " & error)
 
   trace "Generating RLN proof",
@@ -272,6 +293,7 @@ method generateProof*(
 
   # Happy path: cached partial-proof should be available and valid most of the time.
   # On cache miss/staleness, rebuild once and retry. Fall back to full proof generation.
+  let proofGenStart = Moment.now()
   var proofResult: RlnResult[RateLimitProof] = err("partial-proof cache not used")
   var usedPartialCache = false
 
@@ -290,8 +312,13 @@ method generateProof*(
     if proofResult.isErr:
       warn "Cached partial proof could not be used", error = proofResult.error
 
+  mix_rln_partial_proof_cache_total.inc(
+    labelValues = [if usedPartialCache: "hit" else: "miss"]
+  )
+
   if not usedPartialCache and gm of OffchainGroupManager:
     OffchainGroupManager(gm).refreshProofCacheOrLog()
+    mix_rln_partial_proof_cache_total.inc(labelValues = ["refresh"])
     if gm.partialProofCache.isSome:
       proofResult = gm.rlnInstance.finishRlnProofWithCache(
         gm.partialProofCache.get(),
@@ -314,8 +341,14 @@ method generateProof*(
     )
 
   if proofResult.isErr:
+    mix_rln_proof_generation_failures_total.inc(labelValues = ["witness_generation"])
     error "RLN proof generation failed", error = proofResult.error
     return proofResult
+
+  mix_rln_proof_generation_duration_seconds.observe(
+    (Moment.now() - proofGenStart).nanoseconds.float / 1e9,
+    labelValues = [if usedPartialCache: "cached" else: "full"],
+  )
 
   # Log the root that ended up in the generated proof
   let generatedProof = proofResult.get()
@@ -323,6 +356,7 @@ method generateProof*(
     rootsMatch = generatedProof.merkleRoot == currentRoot
 
   if generatedProof.merkleRoot != currentRoot:
+    mix_rln_root_mismatch_total.inc()
     warn "Generated proof contains different root than current tree",
       proofRoot = generatedProof.merkleRoot.toHex(), currentRoot = currentRoot.toHex()
 
@@ -339,7 +373,13 @@ method verifyProof*(
     return err("Group manager not initialized")
 
   let validRoots = gm.rootTracker.getValidRoots()
-  gm.rlnInstance.verifyRlnProof(proof, rlnIdentifier, signal, validRoots)
+  let verifyStart = Moment.now()
+  let verifyResult = gm.rlnInstance.verifyRlnProof(proof, rlnIdentifier, signal, validRoots)
+  if verifyResult.isOk:
+    mix_rln_proof_verification_duration_seconds.observe(
+      (Moment.now() - verifyStart).nanoseconds.float / 1e9
+    )
+  verifyResult
 
 {.pop.}
 
@@ -383,6 +423,10 @@ proc newOffchainGroupManager*(
 proc setPublishCallback*(gm: OffchainGroupManager, callback: PublishCallback) =
   ## Set the callback for publishing membership updates.
   gm.publishCallback = some(callback)
+
+proc updateGroupSizeMetric(gm: OffchainGroupManager) =
+  ## Keep the group size gauge in sync; call after every membership mutation.
+  mix_rln_group_size.set(gm.membershipByIndex.len.int64)
 
 method init*(gm: OffchainGroupManager): Future[RlnResult[void]] {.async.} =
   ## Initialize the offchain group manager.
@@ -442,6 +486,7 @@ proc restoreMemberFromKeystore*(
   gm.membershipByIdCommitment[commitment] = index
   gm.membershipByIndex[index] = commitment
   gm.rateLimitByIdCommitment[commitment] = memberLimit
+  gm.updateGroupSizeMetric()
 
   # Update nextIndex if needed
   if index >= gm.nextIndex:
@@ -489,6 +534,7 @@ method register*(
   gm.membershipByIdCommitment[commitment] = index
   gm.membershipByIndex[index] = commitment
   gm.rateLimitByIdCommitment[commitment] = gm.userMessageLimit
+  gm.updateGroupSizeMetric()
 
   trace "Member added to local tables", index = index
 
@@ -545,6 +591,7 @@ proc registerWithLimit*(
   gm.membershipByIdCommitment[commitment] = index
   gm.membershipByIndex[index] = commitment
   gm.rateLimitByIdCommitment[commitment] = userMessageLimit
+  gm.updateGroupSizeMetric()
 
   # Update root tracker
   gm.updateRootTrackerOrLog()
@@ -617,6 +664,7 @@ method withdraw*(
   gm.membershipByIdCommitment.del(idCommitment)
   gm.membershipByIndex.del(index)
   gm.rateLimitByIdCommitment.del(idCommitment)
+  gm.updateGroupSizeMetric()
 
   # Removals invalidate previously accepted roots.
   gm.resetRootTrackerOrLog()
@@ -680,6 +728,7 @@ proc handleMembershipUpdate*(
     gm.membershipByIdCommitment[update.idCommitment] = update.index
     gm.membershipByIndex[update.index] = update.idCommitment
     gm.rateLimitByIdCommitment[update.idCommitment] = update.userMessageLimit
+    gm.updateGroupSizeMetric()
 
     # Update next index if needed
     if update.index >= gm.nextIndex:
@@ -710,6 +759,7 @@ proc handleMembershipUpdate*(
     gm.membershipByIdCommitment.del(idCommitment)
     gm.membershipByIndex.del(update.index)
     gm.rateLimitByIdCommitment.del(idCommitment)
+    gm.updateGroupSizeMetric()
 
     # Removals invalidate previously accepted roots.
     gm.resetRootTrackerOrLog()
@@ -892,6 +942,7 @@ proc loadTreeSnapshot*(gm: OffchainGroupManager, data: seq[byte]): RlnResult[voi
     gm.rateLimitByIdCommitment[idCommitment] = userMessageLimit
 
   gm.nextIndex = MembershipIndex(nextIndex)
+  gm.updateGroupSizeMetric()
 
   # Replace any previously accepted roots with the snapshot root.
   gm.resetRootTrackerOrLog()
