@@ -38,8 +38,7 @@ const
     ## User message limit used in tests (messages per epoch)
 
   # Membership index - used across multiple tests
-  TestMemberIndex* = 0'u64
-    ## Default membership index for single-member tests
+  TestMemberIndex* = 0'u64 ## Default membership index for single-member tests
 
 # Test helpers
 
@@ -58,7 +57,7 @@ proc valid(x: openArray[byte]): bool =
 
 suite "Constants":
   test "Proof size is correct":
-    check RateLimitProofByteSize == 301  # 288 raw + 13 protobuf overhead
+    check RateLimitProofByteSize == 301 # 288 raw + 13 protobuf overhead
 
   test "Epoch calculation":
     let timestamp = 1700000000.0
@@ -121,7 +120,7 @@ suite "Type Serialization":
 
     # Serialize using protobuf
     let serialized = proof.toBytes()
-    check serialized.len > 0  # Protobuf has variable length
+    check serialized.len > 0 # Protobuf has variable length
 
     # Deserialize using protobuf
     let deserialized = RateLimitProof.decode(serialized)
@@ -144,7 +143,7 @@ suite "Type Serialization":
 
     # Serialize using protobuf
     let serialized = update.toBytes()
-    check serialized.len > 0  # Protobuf has variable length
+    check serialized.len > 0 # Protobuf has variable length
 
     # Deserialize using protobuf
     let deserialized = MembershipUpdate.decode(serialized)
@@ -170,7 +169,7 @@ suite "Type Serialization":
 
     # Serialize using protobuf
     let serialized = broadcast.toBytes()
-    check serialized.len > 0  # Protobuf has variable length
+    check serialized.len > 0 # Protobuf has variable length
 
     # Deserialize using protobuf
     let deserialized = ProofMetadataBroadcast.decode(serialized)
@@ -238,7 +237,7 @@ suite "Nullifier Log":
 
     # Same nullifier but different shares = SPAM
     var metadata2 = metadata1
-    metadata2.shareX[0] = 100  # Different share
+    metadata2.shareX[0] = 100 # Different share
     metadata2.shareY[0] = 200
 
     result = nl.checkAndInsert(metadata2)
@@ -255,7 +254,7 @@ suite "Nullifier Log":
 
     var metadata2: ProofMetadata
     for i in 0 ..< metadata2.nullifier.len:
-      metadata2.nullifier[i] = byte(2)  # Different nullifier
+      metadata2.nullifier[i] = byte(2) # Different nullifier
       metadata2.externalNullifier[i] = byte(1)
 
     let result1 = nl.checkAndInsert(metadata1)
@@ -272,8 +271,22 @@ suite "Tree Serialization Format":
   test "Empty tree snapshot format":
     # Snapshot format: member_count(8) + next_index(8) + members(n * 40)
     let emptySnapshot = @[
-      byte(0), 0, 0, 0, 0, 0, 0, 0,  # member_count = 0
-      byte(0), 0, 0, 0, 0, 0, 0, 0   # next_index = 0
+      byte(0),
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0, # member_count = 0
+      byte(0),
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0, # next_index = 0
     ]
     check emptySnapshot.len == 16
 
@@ -379,7 +392,8 @@ suite "Spam Detection and Secret Recovery":
     let spammerCreds = credResult.get()
 
     # Register spammer in the tree with rate commitment
-    let rateCommitment = computeRateCommitment(spammerCreds.idCommitment, TestUserMessageLimit)
+    let rateCommitment =
+      computeRateCommitment(spammerCreds.idCommitment, TestUserMessageLimit)
     check rateCommitment.isOk
 
     let insertResult = rln.insertMemberAt(TestMemberIndex, rateCommitment.get())
@@ -394,17 +408,29 @@ suite "Spam Detection and Secret Recovery":
 
     # Generate two proofs with SAME messageId (0) but DIFFERENT signals
     # This simulates the spammer sending two different messages in the same epoch
-    let signal1 = @[byte(1), 2, 3, 4]  # First message
-    let signal2 = @[byte(5), 6, 7, 8]  # Second message (spam)
+    let signal1 = @[byte(1), 2, 3, 4] # First message
+    let signal2 = @[byte(5), 6, 7, 8] # Second message (spam)
 
     let proof1Result = rln.generateRlnProofWithWitness(
-      spammerCreds, TestMemberIndex, epoch, rlnId, signal1, messageId = 0, userMessageLimit = TestUserMessageLimit
+      spammerCreds,
+      TestMemberIndex,
+      epoch,
+      rlnId,
+      signal1,
+      messageId = 0,
+      userMessageLimit = TestUserMessageLimit,
     )
     check proof1Result.isOk
     let proof1 = proof1Result.get()
 
     let proof2Result = rln.generateRlnProofWithWitness(
-      spammerCreds, TestMemberIndex, epoch, rlnId, signal2, messageId = 0, userMessageLimit = TestUserMessageLimit
+      spammerCreds,
+      TestMemberIndex,
+      epoch,
+      rlnId,
+      signal2,
+      messageId = 0,
+      userMessageLimit = TestUserMessageLimit,
     )
     check proof2Result.isOk
     let proof2 = proof2Result.get()
@@ -455,8 +481,9 @@ suite "Spam Detection and Secret Recovery":
     check recoveredSecret.get() == spammerCreds.idSecretHash
 
     echo "  ✓ Spam detected and secret recovered successfully!"
-    echo "    Spammer's idSecretHash: ", spammerCreds.idSecretHash.toHex()[0..15], "..."
-    echo "    Recovered secret:       ", recoveredSecret.get().toHex()[0..15], "..."
+    echo "    Spammer's idSecretHash: ",
+      spammerCreds.idSecretHash.toHex()[0 .. 15], "..."
+    echo "    Recovered secret:       ", recoveredSecret.get().toHex()[0 .. 15], "..."
 
   test "Different messageIds produce different nullifiers (no spam)":
     ## This test verifies that using different messageIds within the rate limit
@@ -490,13 +517,25 @@ suite "Spam Detection and Secret Recovery":
     let signal2 = @[byte(5), 6, 7, 8]
 
     let proof1Result = rln.generateRlnProofWithWitness(
-      creds, TestMemberIndex, epoch, rlnId, signal1, messageId = 0, userMessageLimit = TestUserMessageLimit
+      creds,
+      TestMemberIndex,
+      epoch,
+      rlnId,
+      signal1,
+      messageId = 0,
+      userMessageLimit = TestUserMessageLimit,
     )
     check proof1Result.isOk
     let proof1 = proof1Result.get()
 
     let proof2Result = rln.generateRlnProofWithWitness(
-      creds, TestMemberIndex, epoch, rlnId, signal2, messageId = 1, userMessageLimit = TestUserMessageLimit
+      creds,
+      TestMemberIndex,
+      epoch,
+      rlnId,
+      signal2,
+      messageId = 1,
+      userMessageLimit = TestUserMessageLimit,
     )
     check proof2Result.isOk
     let proof2 = proof2Result.get()
@@ -559,7 +598,13 @@ suite "Spam Detection and Secret Recovery":
 
     # Generate proof
     let proofResult = rln.generateRlnProofWithWitness(
-      creds, TestMemberIndex, epoch, rlnId, signal, messageId = 0, userMessageLimit = TestUserMessageLimit
+      creds,
+      TestMemberIndex,
+      epoch,
+      rlnId,
+      signal,
+      messageId = 0,
+      userMessageLimit = TestUserMessageLimit,
     )
     check proofResult.isOk
     let proof = proofResult.get()
@@ -569,9 +614,8 @@ suite "Spam Detection and Secret Recovery":
     check currentRoot.isOk
 
     # Verify the proof is cryptographically valid
-    let verifyResult = rln.verifyRlnProof(
-      proof, rlnId, signal, validRoots = @[currentRoot.get()]
-    )
+    let verifyResult =
+      rln.verifyRlnProof(proof, rlnId, signal, validRoots = @[currentRoot.get()])
     check verifyResult.isOk
     check verifyResult.get() == true
 
@@ -618,7 +662,7 @@ suite "Spam Detection and Secret Recovery":
     # Same proof verified again should be detected as duplicate
     let verifyResult2 = sp.verifyProof(proofBytes, bindingData)
     check verifyResult2.isOk
-    check verifyResult2.get() == false  # Duplicate should return false
+    check verifyResult2.get() == false # Duplicate should return false
 
     # Cleanup
     waitFor sp.stop()
@@ -630,7 +674,9 @@ suite "Partial Proof Cache and Root Tracking":
     let rlnInstance = newRLNInstance()
     check rlnInstance.isOk
 
-    let gm = newOffchainGroupManager(rlnInstance.get(), userMessageLimit = TestUserMessageLimit)
+    let gm = newOffchainGroupManager(
+      rlnInstance.get(), userMessageLimit = TestUserMessageLimit
+    )
     let initResult = waitFor gm.init()
     check initResult.isOk
     let startResult = waitFor gm.start()
@@ -687,7 +733,9 @@ suite "Partial Proof Cache and Root Tracking":
     let rlnInstance = newRLNInstance()
     check rlnInstance.isOk
 
-    let gm = newOffchainGroupManager(rlnInstance.get(), userMessageLimit = TestUserMessageLimit)
+    let gm = newOffchainGroupManager(
+      rlnInstance.get(), userMessageLimit = TestUserMessageLimit
+    )
     check (waitFor gm.init()).isOk
     check (waitFor gm.start()).isOk
 
@@ -722,7 +770,8 @@ suite "Partial Proof Cache and Root Tracking":
   test "Loading a snapshot replaces previously accepted roots":
     let sourceRln = newRLNInstance()
     check sourceRln.isOk
-    let sourceGm = newOffchainGroupManager(sourceRln.get(), userMessageLimit = TestUserMessageLimit)
+    let sourceGm =
+      newOffchainGroupManager(sourceRln.get(), userMessageLimit = TestUserMessageLimit)
     check (waitFor sourceGm.init()).isOk
     check (waitFor sourceGm.start()).isOk
 
@@ -737,7 +786,8 @@ suite "Partial Proof Cache and Root Tracking":
 
     let targetRln = newRLNInstance()
     check targetRln.isOk
-    let targetGm = newOffchainGroupManager(targetRln.get(), userMessageLimit = TestUserMessageLimit)
+    let targetGm =
+      newOffchainGroupManager(targetRln.get(), userMessageLimit = TestUserMessageLimit)
     check (waitFor targetGm.init()).isOk
 
     let emptyRoot = targetGm.rlnInstance.getMerkleRoot()

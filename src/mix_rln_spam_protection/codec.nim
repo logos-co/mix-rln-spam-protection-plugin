@@ -34,12 +34,12 @@ proc encode*(proof: RateLimitProof): ProtoBuffer =
   ## Encode a RateLimitProof to protobuf.
   var buf = initProtoBuffer()
 
-  buf.write3(1, @(proof.proof))        # proof: 128 bytes
-  buf.write3(2, @(proof.merkleRoot))   # merkle_root: 32 bytes
-  buf.write3(3, @(proof.epoch))        # epoch: 32 bytes
-  buf.write3(4, @(proof.shareX))       # share_x: 32 bytes
-  buf.write3(5, @(proof.shareY))       # share_y: 32 bytes
-  buf.write3(6, @(proof.nullifier))    # nullifier: 32 bytes
+  buf.write3(1, @(proof.proof)) # proof: 128 bytes
+  buf.write3(2, @(proof.merkleRoot)) # merkle_root: 32 bytes
+  buf.write3(3, @(proof.epoch)) # epoch: 32 bytes
+  buf.write3(4, @(proof.shareX)) # share_x: 32 bytes
+  buf.write3(5, @(proof.shareY)) # share_y: 32 bytes
+  buf.write3(6, @(proof.nullifier)) # nullifier: 32 bytes
   buf.finish3()
 
   buf

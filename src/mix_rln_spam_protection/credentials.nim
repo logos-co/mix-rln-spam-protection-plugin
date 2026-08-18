@@ -161,13 +161,12 @@ proc decryptCredential(
 
 proc entryToJson(entry: KeystoreEntry): JsonNode =
   ## Convert keystore entry to JSON.
-  var node =
-    %*{
-      "version": entry.version,
-      "salt": entry.salt.toHex(),
-      "iv": entry.iv.toHex(),
-      "ciphertext": entry.ciphertext.toHex(),
-    }
+  var node = %*{
+    "version": entry.version,
+    "salt": entry.salt.toHex(),
+    "iv": entry.iv.toHex(),
+    "ciphertext": entry.ciphertext.toHex(),
+  }
 
   if entry.membershipIndex.isSome:
     node["membershipIndex"] = %entry.membershipIndex.get()
@@ -205,8 +204,7 @@ proc entryFromJson(node: JsonNode): RlnResult[KeystoreEntry] =
       some(MembershipIndex(node["membershipIndex"].getBiggestInt()))
 
   if node.hasKey("userMessageLimit"):
-    entry.userMessageLimit =
-      some(uint64(node["userMessageLimit"].getBiggestInt()))
+    entry.userMessageLimit = some(uint64(node["userMessageLimit"].getBiggestInt()))
 
   ok(entry)
 
@@ -270,7 +268,9 @@ proc loadKeystore*(
   let cred = decryptCredential(entry, password).valueOr:
     return err("Failed to decrypt credential: " & error)
 
-  debug "Loaded keystore", path = path, hasIndex = entry.membershipIndex.isSome,
+  debug "Loaded keystore",
+    path = path,
+    hasIndex = entry.membershipIndex.isSome,
     hasRateLimit = entry.userMessageLimit.isSome
   ok((cred, entry.membershipIndex, entry.userMessageLimit))
 
