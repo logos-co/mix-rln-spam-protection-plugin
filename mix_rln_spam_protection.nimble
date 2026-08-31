@@ -13,7 +13,7 @@ requires "chronicles >= 0.11.0"
 requires "metrics >= 0.1.0"
 requires "chronos >= 4.2.2"
 requires "nimcrypto >= 0.6.0"
-requires "secp256k1 >= 0.5.0"
+requires "https://github.com/status-im/nim-secp256k1#d8f1288b7c72f00be5fc2c5ea72bf5cae1eafb15"
 requires "json_serialization >= 0.2.0"
 
 # nim-libp2p — used only for protobuf/minprotobuf and varint, a surface that
