@@ -22,7 +22,7 @@ requires "libp2p == 2.3.1"
 # libp2p_mix — extracted into its own repo; previously libp2p/protocols/mix.
 # Use the exact revision pinned by logos-delivery. This keeps the Mix and
 # libp2p portions of the dependency graph identical in both modules.
-requires "https://github.com/logos-co/nim-libp2p-mix.git#39d2ac78da7b7f33562eb7cd95d6280ca9fa0e94"
+requires "https://github.com/logos-co/nim-libp2p-mix#39d2ac78da7b7f33562eb7cd95d6280ca9fa0e94"
 
 # Tasks
 task test, "Run tests":
