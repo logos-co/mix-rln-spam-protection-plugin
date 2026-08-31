@@ -197,6 +197,7 @@ proc advanceEpoch(sp: MixRlnSpamProtection, epoch: Epoch) =
   sp.messageIdCounter = 0
   sp.freedMessageIds.clear()
   sp.lastEpoch = epoch
+  sp.nullifierLog.prune(epoch, sp.config.maxEpochGap)
   sp.notifyEpochChange(epochToUint64(epoch))
 
 proc runEpochTimer(sp: MixRlnSpamProtection) {.async: (raises: [CancelledError]).} =
@@ -244,7 +245,6 @@ proc start*(sp: MixRlnSpamProtection): Future[RlnResult[void]] {.async.} =
   if gmStartResult.isErr:
     return err("Failed to start group manager: " & gmStartResult.error)
 
-  sp.nullifierLog.start()
   sp.epochTimerLoop = sp.runEpochTimer()
 
   sp.state = PluginState.Ready
@@ -268,7 +268,6 @@ proc stop*(sp: MixRlnSpamProtection) {.async.} =
   sp.pendingBroadcasts.setLen(0)
 
   await sp.groupManager.stop()
-  await sp.nullifierLog.stop()
 
   info "MixRlnSpamProtection stopped"
 
@@ -604,6 +603,7 @@ method verifyProof*(
     shareX: proof.shareX,
     shareY: proof.shareY,
     externalNullifier: extNullifier,
+    epoch: proof.epoch,
   )
 
   let spamResult =

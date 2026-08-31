@@ -73,6 +73,7 @@ type
     shareX*: ShareX
     shareY*: ShareY
     externalNullifier*: ExternalNullifier
+    epoch*: Epoch
 
   # Message validation result
   MessageValidationResult* = enum
