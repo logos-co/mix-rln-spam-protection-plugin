@@ -15,19 +15,14 @@ requires "nimcrypto >= 0.6.0"
 requires "secp256k1 >= 0.5.0"
 requires "json_serialization >= 0.2.0"
 
-# nim-libp2p — used directly for protobuf/minprotobuf and varint. Pinned to
-# the v2.1.4 release tag, matching the `libp2p == 2.1.4` requirement in
-# nim-libp2p-mix so the diamond dep resolves to a single libp2p source.
-# Now that vacp2p/nim-libp2p publishes release tags, this is a version
-# requirement rather than a SHA pin (see issue #8).
-requires "libp2p == 2.1.4"
+# Match logos-delivery so both modules resolve one libp2p source and run on
+# Delivery's existing switch.
+requires "libp2p == 2.3.1"
 
 # libp2p_mix — extracted into its own repo; previously libp2p/protocols/mix.
-# Pinned to master tip, which carries the libp2p v2.1.4 bump (#23) and the
-# LIONESS wide-block payload encryption (#30, LIP-183). Master requires
-# `libp2p == 2.1.4`, keeping the diamond dep collapsed to one libp2p source;
-# waku.nimble should pin the same SHA.
-requires "https://github.com/logos-co/nim-libp2p-mix.git#c387ca67cf477dc53ec6228027c45d8eda067917"
+# Use the exact revision pinned by logos-delivery. This keeps the Mix and
+# libp2p portions of the dependency graph identical in both modules.
+requires "https://github.com/logos-co/nim-libp2p-mix.git#39d2ac78da7b7f33562eb7cd95d6280ca9fa0e94"
 
 # Tasks
 task test, "Run tests":
