@@ -6,14 +6,14 @@ license = "MIT OR Apache-2.0"
 srcDir = "src"
 
 # Dependencies
-requires "nim == 2.2.6"
-requires "results == 0.5.1"
-requires "stew == 0.5.2"
-requires "chronicles == 0.12.4"
-requires "chronos == 4.2.4"
-requires "nimcrypto == 0.6.4"
+requires "nim >= 2.2.4"
+requires "results >= 0.4.0"
+requires "stew >= 0.4.2"
+requires "chronicles >= 0.11.0"
+requires "chronos >= 4.2.2"
+requires "nimcrypto >= 0.6.0"
 requires "https://github.com/status-im/nim-secp256k1#d8f1288b7c72f00be5fc2c5ea72bf5cae1eafb15"
-requires "json_serialization == 0.4.5"
+requires "json_serialization >= 0.2.0"
 
 # Match logos-delivery so both modules resolve one libp2p source and run on
 # Delivery's existing switch.
