@@ -15,14 +15,9 @@ requires "nimcrypto >= 0.6.0"
 requires "https://github.com/status-im/nim-secp256k1#d8f1288b7c72f00be5fc2c5ea72bf5cae1eafb15"
 requires "json_serialization >= 0.2.0"
 
-# Match logos-delivery so both modules resolve one libp2p source and run on
-# Delivery's existing switch.
+# Keep the plugin and standalone Mix facade on compatible libp2p/Mix APIs.
 requires "libp2p == 2.3.1"
-
-# libp2p_mix — extracted into its own repo; previously libp2p/protocols/mix.
-# Use the exact revision pinned by logos-delivery. This keeps the Mix and
-# libp2p portions of the dependency graph identical in both modules.
-requires "https://github.com/logos-co/nim-libp2p-mix#39d2ac78da7b7f33562eb7cd95d6280ca9fa0e94"
+requires "https://github.com/richard-ramos/nim-libp2p-mix#57def1fef5763fc4cc27a386276cd65165eeb489"
 
 # Tasks
 task test, "Run tests":
