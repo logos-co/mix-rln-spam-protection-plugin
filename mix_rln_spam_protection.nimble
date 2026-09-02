@@ -16,19 +16,9 @@ requires "nimcrypto >= 0.6.0"
 requires "https://github.com/status-im/nim-secp256k1#d8f1288b7c72f00be5fc2c5ea72bf5cae1eafb15"
 requires "json_serialization >= 0.2.0"
 
-# nim-libp2p — used only for protobuf/minprotobuf and varint, a surface that
-# has been stable for years. A range, not an exact pin: as a library this
-# should state the loosest constraint it actually needs and let the consuming
-# application pin the exact version. An exact pin here is what previously
-# froze the plugin at 2.1.4 while logos-delivery moved on, making the two
-# unsatisfiable together. Lower bound matches libp2p_mix's own requirement.
-requires "libp2p >= 2.2.0"
-
-# libp2p_mix — extracted into its own repo; previously libp2p/protocols/mix.
-# Pinned to the same SHA logos-delivery master pins, which relaxes its own
-# libp2p requirement to >= 2.2.0. Only `libp2p_mix/spam_protection` is used
-# here, and it is unchanged from the previous #c387ca67 pin.
-requires "https://github.com/logos-co/nim-libp2p-mix#39d2ac78da7b7f33562eb7cd95d6280ca9fa0e94"
+# Keep the plugin and standalone Mix facade on compatible libp2p/Mix APIs.
+requires "libp2p >= 2.3.1"
+requires "https://github.com/richard-ramos/nim-libp2p-mix#57def1fef5763fc4cc27a386276cd65165eeb489"
 
 # Tasks
 task test, "Run tests":
