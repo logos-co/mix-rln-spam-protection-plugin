@@ -12,7 +12,7 @@
 ## Run tests with dynamic linking:
 ##   nim c -r -d:rlnDynlib tests/test_all.nim
 
-import std/[options, random]
+import std/[options, os, random]
 import chronos
 import results
 
@@ -33,14 +33,30 @@ import std/unittest
 # =============================================================================
 
 const
-  # Rate limiting - used across multiple spam detection tests
-  TestUserMessageLimit* = 100'u64
-    ## User message limit used in tests (messages per epoch)
+  # Two distinct stake amounts for tests. Single-member tests can pick either
+  # (TestStakeAmount1 by default); multi-member tests use both to exercise
+  # multi-rate scenarios. Tests compute the per-epoch rate via
+  # computeUserMessageLimit.
+  TestStakeAmount1* = 100'u64 * DefaultStakeUnit
+    ## Yields rate = 100 with DefaultStakeUnit=1 and DefaultStakeTierSize=10.
+
+  TestStakeAmount2* = 200'u64 * DefaultStakeUnit
+    ## Yields rate = 200 with DefaultStakeUnit=1 and DefaultStakeTierSize=10.
+
+  TestRate1* = computeUserMessageLimit(TestStakeAmount1).get()
+    ## Stake-derived rate for TestStakeAmount1 (100 with the default parameters)
+
+  TestRate2* = computeUserMessageLimit(TestStakeAmount2).get()
+    ## Stake-derived rate for TestStakeAmount2 (200 with the default parameters)
 
   # Membership index - used across multiple tests
   TestMemberIndex* = 0'u64 ## Default membership index for single-member tests
 
 # Test helpers
+
+proc tempKeystorePath(): string =
+  ## Unique keystore path for tests that persist credentials.
+  getTempDir() / ("mix_rln_test_" & $rand(high(int32)) & ".json")
 
 proc mkEpoch(v: uint64): Epoch =
   ## Build an epoch holding `v` in the first 8 bytes, little-endian.
@@ -205,6 +221,7 @@ suite "Type Serialization":
     update.action = MembershipAction.Add
     for i in 0 ..< update.idCommitment.len:
       update.idCommitment[i] = byte(i)
+    update.userMessageLimit = TestRate1
     update.index = 12345
 
     # Serialize using protobuf
@@ -218,7 +235,20 @@ suite "Type Serialization":
 
     check update.action == update2.action
     check update.idCommitment == update2.idCommitment
+    check update.userMessageLimit == update2.userMessageLimit
     check update.index == update2.index
+
+  test "decode rejects a MembershipUpdate without a rate limit":
+    # Under stake-weighted registration there is no network-wide default
+    # rate, so user_message_limit is a required field. Build the buffer by
+    # hand with field 3 left out.
+    var commitment: IDCommitment
+    var buf = initProtoBuffer()
+    buf.write3(1, uint32(ord(MembershipAction.Add)))
+    buf.write3(2, @(commitment))
+    buf.write3(4, 1'u64)
+    buf.finish3()
+    check MembershipUpdate.decode(buf.buffer).isErr
 
   test "ProofMetadataBroadcast serialization roundtrip":
     var broadcast: ProofMetadataBroadcast
@@ -263,6 +293,7 @@ suite "Type Serialization":
   test "decode rejects a membership index beyond tree capacity":
     var update: MembershipUpdate
     update.action = MembershipAction.Add
+    update.userMessageLimit = TestRate1
     update.index = MerkleTreeCapacity
     check MembershipUpdate.decode(update.toBytes()).isErr
 
@@ -447,7 +478,7 @@ suite "Configuration":
 
     check config.epochDurationSeconds == EpochDurationSeconds
     check config.maxEpochGap == MaxEpochGap
-    check config.userMessageLimit == UserMessageLimit
+    check config.stakeAmount == 0 # operator must set before registerSelf
     check config.keystorePath == DefaultKeystorePath
     check config.treePath == DefaultTreePath
 
@@ -455,6 +486,80 @@ suite "Configuration":
     let id = defaultRlnIdentifier()
     # Should have content (from MixRlnIdentifier constant)
     check id.valid()
+
+# =============================================================================
+# RATE LIMIT COMPUTATION TESTS
+# =============================================================================
+
+suite "Rate Limit Computation":
+  const TierStake = DefaultStakeTierSize * DefaultStakeUnit
+    ## Stake per tier (spec: T * S_unit)
+
+  test "Mid-range stake yields proportional rate":
+    # stakeAmount = exact multiple of TierStake between floor and cap
+    # -> rate = matching multiple of DefaultStakeTierSize
+    let tiers = (DefaultRateMin div DefaultStakeTierSize) + 3
+    let result = computeUserMessageLimit(tiers * TierStake)
+    check result.isOk
+    check result.get() == tiers * DefaultStakeTierSize
+
+  test "Floor-stake yields DefaultRateMin":
+    # stakeAmount = FloorStakeAmount -> rate = DefaultRateMin
+    let result = computeUserMessageLimit(FloorStakeAmount)
+    check result.isOk
+    check result.get() == DefaultRateMin
+
+  test "Stake just below floor errors":
+    # stakeAmount < FloorStakeAmount -> reject
+    let result = computeUserMessageLimit(FloorStakeAmount - 1'u64)
+    check result.isErr
+
+  test "Zero stake errors":
+    # stakeAmount = 0 -> reject
+    let result = computeUserMessageLimit(0'u64)
+    check result.isErr
+
+  test "Stake above cap yields DefaultRateMax":
+    # stakeAmount > DefaultRateMax * DefaultStakeUnit -> rate = DefaultRateMax
+    let bigStake = (DefaultRateMax + 100'u64) * DefaultStakeUnit
+    let result = computeUserMessageLimit(bigStake)
+    check result.isOk
+    check result.get() == DefaultRateMax
+
+  test "Fractional stake floors correctly":
+    # stakeAmount mod TierStake != 0
+    # -> fractional tier ignored, rate stays at the lower tier boundary
+    let result = computeUserMessageLimit(FloorStakeAmount + TierStake - 1'u64)
+    check result.isOk
+    check result.get() == DefaultRateMin
+
+  test "Computed rates pass registry-side validation":
+    # Every mapping output must be admissible by validateRate
+    var stake = FloorStakeAmount
+    while stake <= (DefaultRateMax + DefaultStakeTierSize) * DefaultStakeUnit:
+      let rate = computeUserMessageLimit(stake)
+      check rate.isOk
+      check validateRate(rate.get()).isOk
+      stake += TierStake div 2
+
+  test "Splitting stake never yields more aggregate rate (Sybil-resistance)":
+    # For any split S = S1 + S2, rate(S1) + rate(S2) <= rate(S), with
+    # equality when both parts are exact multiples of TierStake
+    let whole = 7'u64 * FloorStakeAmount
+    let wholeRate = computeUserMessageLimit(whole).get()
+
+    # exact tier multiples -> additive
+    let evenSplit =
+      computeUserMessageLimit(3'u64 * FloorStakeAmount).get() +
+      computeUserMessageLimit(4'u64 * FloorStakeAmount).get()
+    check evenSplit == wholeRate
+
+    # off-boundary split -> loses the fractional tiers
+    let part1 = 3'u64 * FloorStakeAmount + TierStake div 2
+    let part2 = whole - part1
+    let unevenSplit =
+      computeUserMessageLimit(part1).get() + computeUserMessageLimit(part2).get()
+    check unevenSplit <= wholeRate
 
 # =============================================================================
 # SPAM DETECTION AND SECRET RECOVERY TESTS (requires zerokit)
@@ -482,8 +587,7 @@ suite "Spam Detection and Secret Recovery":
     let spammerCreds = credResult.get()
 
     # Register spammer in the tree with rate commitment
-    let rateCommitment =
-      computeRateCommitment(spammerCreds.idCommitment, TestUserMessageLimit)
+    let rateCommitment = computeRateCommitment(spammerCreds.idCommitment, TestRate1)
     check rateCommitment.isOk
 
     let insertResult = rln.insertMemberAt(TestMemberIndex, rateCommitment.get())
@@ -508,7 +612,7 @@ suite "Spam Detection and Secret Recovery":
       rlnId,
       signal1,
       messageId = 0,
-      userMessageLimit = TestUserMessageLimit,
+      userMessageLimit = TestRate1,
     )
     check proof1Result.isOk
     let proof1 = proof1Result.get()
@@ -520,7 +624,7 @@ suite "Spam Detection and Secret Recovery":
       rlnId,
       signal2,
       messageId = 0,
-      userMessageLimit = TestUserMessageLimit,
+      userMessageLimit = TestRate1,
     )
     check proof2Result.isOk
     let proof2 = proof2Result.get()
@@ -590,7 +694,7 @@ suite "Spam Detection and Secret Recovery":
     let creds = credResult.get()
 
     # Register member
-    let rateCommitment = computeRateCommitment(creds.idCommitment, TestUserMessageLimit)
+    let rateCommitment = computeRateCommitment(creds.idCommitment, TestRate1)
     check rateCommitment.isOk
     let insertResult = rln.insertMemberAt(TestMemberIndex, rateCommitment.get())
     check insertResult.isOk
@@ -613,7 +717,7 @@ suite "Spam Detection and Secret Recovery":
       rlnId,
       signal1,
       messageId = 0,
-      userMessageLimit = TestUserMessageLimit,
+      userMessageLimit = TestRate1,
     )
     check proof1Result.isOk
     let proof1 = proof1Result.get()
@@ -625,7 +729,7 @@ suite "Spam Detection and Secret Recovery":
       rlnId,
       signal2,
       messageId = 1,
-      userMessageLimit = TestUserMessageLimit,
+      userMessageLimit = TestRate1,
     )
     check proof2Result.isOk
     let proof2 = proof2Result.get()
@@ -674,7 +778,7 @@ suite "Spam Detection and Secret Recovery":
     let creds = credResult.get()
 
     # Register member
-    let rateCommitment = computeRateCommitment(creds.idCommitment, TestUserMessageLimit)
+    let rateCommitment = computeRateCommitment(creds.idCommitment, TestRate1)
     check rateCommitment.isOk
     let insertResult = rln.insertMemberAt(TestMemberIndex, rateCommitment.get())
     check insertResult.isOk
@@ -694,7 +798,7 @@ suite "Spam Detection and Secret Recovery":
       rlnId,
       signal,
       messageId = 0,
-      userMessageLimit = TestUserMessageLimit,
+      userMessageLimit = TestRate1,
     )
     check proofResult.isOk
     let proof = proofResult.get()
@@ -716,7 +820,7 @@ suite "Spam Detection and Secret Recovery":
 
     # Create config
     var config = defaultConfig()
-    config.userMessageLimit = int(TestUserMessageLimit)
+    config.stakeAmount = TestStakeAmount1
 
     # Create spam protection instance
     let spResult = MixRlnSpamProtection.new(config)
@@ -787,14 +891,68 @@ suite "Spam Detection and Secret Recovery":
       calcEpoch(float64(curEpochNum + int64(MaxEpochGap) + 2) * EpochDurationSeconds)
     check sp.handleProofMetadata(broadcast.toBytes()).isErr
 
+# =============================================================================
+# KEYSTORE PERSISTENCE TESTS (requires zerokit)
+# =============================================================================
+
+suite "Keystore Persistence":
+  test "Restart from keystore rebuilds the registered leaf":
+    var config = defaultConfig()
+    config.stakeAmount = TestStakeAmount2
+    config.keystorePassword = "test-password"
+    config.keystorePath = tempKeystorePath()
+    defer:
+      removeFile(config.keystorePath)
+
+    # First run: register with stake, which writes index and rate to keystore.
+    let first = MixRlnSpamProtection.new(config).get()
+    check (waitFor first.init()).isOk
+    let index = waitFor first.registerSelf()
+    check index.isOk
+    check (waitFor first.start()).isOk
+    let firstRate = first.rateLimitBudget()
+
+    # Second run with no tree file: init loads the keystore, the restore
+    # re-inserts the leaf, and registerSelf returns the stored index.
+    let second = MixRlnSpamProtection.new(config).get()
+    check (waitFor second.init()).isOk
+    check second.restoreCredentialsToTree().isOk
+    check (waitFor second.start()).isOk
+    check (waitFor second.registerSelf()).get() == index.get()
+    check second.rateLimitBudget() == firstRate
+
+    # A proof from the restarted node verifies against the first node's
+    # tree, so both hold the same leaf and root.
+    let bindingData = @[byte(1), 2, 3]
+    let proof = second.generateProof(bindingData)
+    check proof.isOk
+    check first.verifyProof(proof.get().proof, bindingData).get() == true
+
+    waitFor first.stop()
+    waitFor second.stop()
+
+  test "Keystore with an index but no rate limit is rejected at init":
+    var config = defaultConfig()
+    config.keystorePassword = "test-password"
+    config.keystorePath = tempKeystorePath()
+    defer:
+      removeFile(config.keystorePath)
+
+    # A flat-rate build persisted the index without a rate.
+    let creds = generateCredentials().get()
+    check saveKeystore(
+      creds, config.keystorePassword, config.keystorePath, some(TestMemberIndex)
+    ).isOk
+
+    let sp = MixRlnSpamProtection.new(config).get()
+    check (waitFor sp.init()).isErr
+
 suite "Partial Proof Cache and Root Tracking":
   test "Partial proof cache stores Merkle path and finishes valid proofs":
     let rlnInstance = newRLNInstance()
     check rlnInstance.isOk
 
-    let gm = newOffchainGroupManager(
-      rlnInstance.get(), userMessageLimit = TestUserMessageLimit
-    )
+    let gm = newOffchainGroupManager(rlnInstance.get(), userMessageLimit = TestRate1)
     let initResult = waitFor gm.init()
     check initResult.isOk
     let startResult = waitFor gm.start()
@@ -827,7 +985,7 @@ suite "Partial Proof Cache and Root Tracking":
       rlnId,
       signal,
       messageId = 0,
-      userMessageLimit = TestUserMessageLimit,
+      userMessageLimit = TestRate1,
     )
     check proofResult.isOk
 
@@ -839,7 +997,7 @@ suite "Partial Proof Cache and Root Tracking":
       rlnId,
       signal,
       messageId = 0,
-      userMessageLimit = TestUserMessageLimit,
+      userMessageLimit = TestRate1,
     )
     check wrongIndexResult.isErr
 
@@ -851,9 +1009,7 @@ suite "Partial Proof Cache and Root Tracking":
     let rlnInstance = newRLNInstance()
     check rlnInstance.isOk
 
-    let gm = newOffchainGroupManager(
-      rlnInstance.get(), userMessageLimit = TestUserMessageLimit
-    )
+    let gm = newOffchainGroupManager(rlnInstance.get(), userMessageLimit = TestRate1)
     check (waitFor gm.init()).isOk
     check (waitFor gm.start()).isOk
 
@@ -865,11 +1021,16 @@ suite "Partial Proof Cache and Root Tracking":
     let rootBeforeSecondMember = gm.rlnInstance.getMerkleRoot()
     check rootBeforeSecondMember.isOk
 
+    # Register the peer at a different rate than this node.
     let peerCreds = generateCredentials()
     check peerCreds.isOk
-    let peerRegister = waitFor gm.register(peerCreds.get().idCommitment)
+    let peerRegister =
+      waitFor gm.registerWithLimit(peerCreds.get().idCommitment, TestRate2)
     check peerRegister.isOk
     let peerIndex = peerRegister.get()
+
+    check gm.getMemberRateLimit(selfCreds.get().idCommitment) == some(TestRate1)
+    check gm.getMemberRateLimit(peerCreds.get().idCommitment) == some(TestRate2)
 
     let rootBeforeRemoval = gm.rlnInstance.getMerkleRoot()
     check rootBeforeRemoval.isOk
@@ -878,6 +1039,8 @@ suite "Partial Proof Cache and Root Tracking":
 
     let withdrawResult = waitFor gm.withdraw(peerIndex)
     check withdrawResult.isOk
+
+    check gm.getMemberRateLimit(peerCreds.get().idCommitment) == none(uint64)
 
     let currentRoot = gm.rlnInstance.getMerkleRoot()
     check currentRoot.isOk
@@ -889,13 +1052,15 @@ suite "Partial Proof Cache and Root Tracking":
     let sourceRln = newRLNInstance()
     check sourceRln.isOk
     let sourceGm =
-      newOffchainGroupManager(sourceRln.get(), userMessageLimit = TestUserMessageLimit)
+      newOffchainGroupManager(sourceRln.get(), userMessageLimit = TestRate1)
     check (waitFor sourceGm.init()).isOk
     check (waitFor sourceGm.start()).isOk
 
+    # Register the member at a different rate than the node loading the snapshot.
     let memberCreds = generateCredentials()
     check memberCreds.isOk
-    let sourceRegister = waitFor sourceGm.register(memberCreds.get().idCommitment)
+    let sourceRegister =
+      waitFor sourceGm.registerWithLimit(memberCreds.get().idCommitment, TestRate2)
     check sourceRegister.isOk
 
     let snapshot = sourceGm.serializeTreeSnapshot()
@@ -905,7 +1070,7 @@ suite "Partial Proof Cache and Root Tracking":
     let targetRln = newRLNInstance()
     check targetRln.isOk
     let targetGm =
-      newOffchainGroupManager(targetRln.get(), userMessageLimit = TestUserMessageLimit)
+      newOffchainGroupManager(targetRln.get(), userMessageLimit = TestRate1)
     check (waitFor targetGm.init()).isOk
 
     let emptyRoot = targetGm.rlnInstance.getMerkleRoot()
@@ -919,10 +1084,13 @@ suite "Partial Proof Cache and Root Tracking":
     check not targetGm.validateRoot(emptyRoot.get())
     check targetGm.validateRoot(snapshotRoot.get())
 
+    # The snapshot carries each member's own rate, not the loading node's.
+    check targetGm.getMemberRateLimit(memberCreds.get().idCommitment) == some(TestRate2)
+
   test "Snapshot with an out-of-range member count is rejected":
     let rln = newRLNInstance()
     check rln.isOk
-    let gm = newOffchainGroupManager(rln.get(), userMessageLimit = TestUserMessageLimit)
+    let gm = newOffchainGroupManager(rln.get(), userMessageLimit = TestRate1)
     check (waitFor gm.init()).isOk
 
     # member_count above high(int64) used to reach int(memberCount) and raise
@@ -939,6 +1107,41 @@ suite "Partial Proof Cache and Root Tracking":
     # A short buffer is caught by the header-length guard, ahead of any read.
     check gm.loadTreeSnapshot(newSeq[byte](12)).isErr
 
+  test "Snapshot with an out-of-range member rate is rejected":
+    let rln = newRLNInstance()
+    check rln.isOk
+    let gm = newOffchainGroupManager(rln.get(), userMessageLimit = TestRate1)
+    check (waitFor gm.init()).isOk
+
+    # One member at index 0 whose rate the stake-to-rate mapping can never
+    # produce (0, below DefaultRateMin, and not a multiple of the tier size).
+    var hostile = newSeq[byte](16 + 48)
+    hostile[0] = 1 # member_count = 1
+    hostile[8] = 1 # next_index = 1
+    for i in 0 ..< 32:
+      hostile[16 + i] = byte(i + 1) # commitment
+    check gm.loadTreeSnapshot(hostile).isErr # rate = 0
+
+    hostile[16 + 40] = 7 # rate = 7, not a multiple of DefaultStakeTierSize
+    check gm.loadTreeSnapshot(hostile).isErr
+
+  test "Membership update with an unproducible rate is rejected":
+    let rln = newRLNInstance()
+    check rln.isOk
+    let gm = newOffchainGroupManager(rln.get(), userMessageLimit = TestRate1)
+    check (waitFor gm.init()).isOk
+    check (waitFor gm.start()).isOk
+
+    let peerCreds = generateCredentials()
+    check peerCreds.isOk
+    let update = MembershipUpdate(
+      action: MembershipAction.Add,
+      idCommitment: peerCreds.get().idCommitment,
+      userMessageLimit: DefaultRateMax + DefaultStakeTierSize,
+      index: 0,
+    )
+    check (waitFor gm.handleMembershipUpdate(update)).isErr
+
 suite "Epoch Change Notification":
   test "epochDurationSeconds returns configured value":
     var cfg = defaultConfig()
@@ -947,15 +1150,23 @@ suite "Epoch Change Notification":
     check sp.isOk
     check sp.get().epochDurationSeconds() == 15.0
 
-  test "rateLimitBudget returns configured userMessageLimit":
+  test "rateLimitBudget returns computed userMessageLimit":
     var cfg = defaultConfig()
-    cfg.userMessageLimit = 50
+    cfg.stakeAmount = TestStakeAmount2
     let sp = MixRlnSpamProtection.new(cfg)
     check sp.isOk
-    check sp.get().rateLimitBudget() == 50
+    let plugin = sp.get()
+
+    # No rate before registration; the limit is computed from stake.
+    check plugin.rateLimitBudget() == 0
+
+    check (waitFor plugin.init()).isOk
+    check (waitFor plugin.registerSelf()).isOk
+    check plugin.rateLimitBudget() == int(TestRate2)
 
   test "registered epoch change callback fires on generateProof":
-    let config = defaultConfig()
+    var config = defaultConfig()
+    config.stakeAmount = TestStakeAmount1
     let sp = MixRlnSpamProtection.new(config)
     check sp.isOk
     let plugin = sp.get()
@@ -986,6 +1197,7 @@ suite "Epoch Change Notification":
     # boundary on its own.
     var cfg = defaultConfig()
     cfg.epochDurationSeconds = 1.0
+    cfg.stakeAmount = TestStakeAmount1
     let sp = MixRlnSpamProtection.new(cfg)
     check sp.isOk
     let plugin = sp.get()

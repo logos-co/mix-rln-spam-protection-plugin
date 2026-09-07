@@ -4,6 +4,8 @@
 
 ## Constants for the RLN spam protection plugin.
 
+import std/math
+
 const
   # Merkle tree configuration
   MerkleTreeDepth* = 20
@@ -27,7 +29,7 @@ const
   # Rate limiting parameters
   EpochDurationSeconds* = 10.0
     ## Duration of each epoch in seconds. Nodes can send up to
-    ## UserMessageLimit messages per epoch.
+    ## their stake-derived userMessageLimit messages per epoch.
 
   MaxEpochGap* = 3
     ## Maximum allowed epoch gap between message epoch and current epoch.
@@ -40,11 +42,39 @@ const
     ## (proof generation plus upstream forwarding delays; sub-second at the
     ## default mean per-hop delay, absorbed in the skew slack). Revisit if the
     ## epoch duration shrinks or per-hop delays grow to a meaningful fraction
-    ## of an epoch. Each accepted epoch carries a full UserMessageLimit
+    ## of an epoch. Each accepted epoch carries a full per-node rate-limit
     ## allowance, so the window multiplies burst capacity by 2*MaxEpochGap + 1
     ## (see issue #14).
 
-  UserMessageLimit* = 100 ## Maximum number of messages a member can send per epoch.
+  # Stake-weighted rate limiting parameters
+  DefaultRateBase* = 100'u64
+    ## Default flat per-node rate limit per epoch (spec: R_base).
+    ## Used only to derive DefaultRateMin; under stake-weighted
+    ## registration, userMessageLimit is computed from stake.
+
+  DefaultStakeUnit* = 1'u64
+    ## Default stake required per message per epoch (spec: S_unit).
+
+  DefaultStakeTierSize* = 10'u64
+    ## Default stake tier size (spec: T >= 1). Each tier corresponds to a
+    ## stake increment of DefaultStakeTierSize * DefaultStakeUnit and a rate
+    ## increment of DefaultStakeTierSize, so registered rates cluster at
+    ## multiples of it (T >= 10 recommended for registered-stake privacy).
+
+  DefaultRateMax* = 1000'u64
+    ## Default maximum rate cap regardless of stake (spec: R_max), a published
+    ## deployment constant. The spec requires a multiple of DefaultStakeTierSize
+    ## and at least DefaultRateMin; both are asserted below. 10 * DefaultRateBase
+    ## is the spec's suggested starting point.
+
+  DefaultRateMin* =
+    ceilDiv(DefaultRateBase, DefaultStakeTierSize) * DefaultStakeTierSize
+    ## Default minimum rate (spec: R_min), the smallest multiple of
+    ## DefaultStakeTierSize >= DefaultRateBase. Nodes with
+    ## stakeAmount < FloorStakeAmount are rejected.
+
+  FloorStakeAmount* = DefaultRateMin * DefaultStakeUnit
+    ## Minimum stake required to register (spec: floor-stake).
 
   # Root validation
   AcceptableRootWindowSize* = 5
@@ -71,3 +101,30 @@ const
 
   DefaultKeystorePath* = "rln_keystore.json"
     ## Default path for the credentials keystore.
+
+static:
+  # Validate stake-weighted constants at compile time.
+  doAssert DefaultStakeUnit > 0,
+    "DefaultStakeUnit (" & $DefaultStakeUnit & ") must be > 0"
+  doAssert DefaultRateBase >= 1,
+    "DefaultRateBase (" & $DefaultRateBase & ") must be >= 1"
+  doAssert DefaultStakeTierSize >= 1,
+    "DefaultStakeTierSize (" & $DefaultStakeTierSize & ") must be >= 1"
+  doAssert DefaultRateMin >= DefaultRateBase,
+    "DefaultRateMin (" & $DefaultRateMin & ") must be >= DefaultRateBase (" &
+      $DefaultRateBase & ")"
+  doAssert DefaultRateMin < DefaultRateBase + DefaultStakeTierSize,
+    "DefaultRateMin (" & $DefaultRateMin & ") must be the smallest multiple of " &
+      "DefaultStakeTierSize (" & $DefaultStakeTierSize & ") >= DefaultRateBase (" &
+      $DefaultRateBase & ")"
+  doAssert DefaultRateMin mod DefaultStakeTierSize == 0,
+    "DefaultRateMin (" & $DefaultRateMin &
+      ") must be a multiple of DefaultStakeTierSize (" & $DefaultStakeTierSize & ")"
+  doAssert DefaultRateMax >= DefaultRateMin,
+    "DefaultRateMax (" & $DefaultRateMax & ") must be >= DefaultRateMin (" &
+      $DefaultRateMin & ")"
+  doAssert DefaultRateMax mod DefaultStakeTierSize == 0,
+    "DefaultRateMax (" & $DefaultRateMax &
+      ") must be a multiple of DefaultStakeTierSize (" & $DefaultStakeTierSize & ")"
+  doAssert DefaultRateMax <= uint64(high(int)),
+    "DefaultRateMax (" & $DefaultRateMax & ") must be <= high(int) (" & $high(int) & ")"
