@@ -35,9 +35,7 @@ type
     iv: seq[byte]
     ciphertext: seq[byte] # Encrypted IdentityCredential
     membershipIndex: Option[MembershipIndex]
-    userMessageLimit: Option[uint64]
-      # Stake-derived rate limit at registration; required to recompute
-      # the member's rateCommitment on restart
+    userMessageLimit: Option[uint64] # Per-user rate limit (0 means use node default)
 
   # Keystore containing multiple credentials
   Keystore* = object

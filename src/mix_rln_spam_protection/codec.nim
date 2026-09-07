@@ -138,7 +138,8 @@ proc decode*(T: type MembershipUpdate, buffer: seq[byte]): ProtobufResult[T] =
 
   var userMessageLimit: uint64
   if not ?pb.getField(3, userMessageLimit):
-    return err(ProtobufError.missingRequiredField("user_message_limit"))
+    # Default to 100 for backward compatibility
+    userMessageLimit = UserMessageLimit
   update.userMessageLimit = userMessageLimit
 
   var index: uint64
