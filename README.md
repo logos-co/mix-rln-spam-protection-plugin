@@ -8,6 +8,7 @@ This plugin provides:
 
 - **RLN proof primitives**: `generateProof(bindingData)` and `verifyProof(proof, bindingData)` methods
 - **Spam detection**: Detects double-signaling (sending more than allowed messages per epoch)
+- **Stake-weighted rate limit**: A node's per-epoch limit derived from its declared stake
 - **Offchain membership**: Membership managed via logos-messaging content topics (no blockchain required)
 - **Pluggable architecture**: Implements nim-libp2p's `SpamProtection` interface for easy integration
 
@@ -93,6 +94,9 @@ import mix_rln_spam_protection
 var config = defaultConfig()
 config.keystorePassword = "my-secure-password"
 
+# Declared stake; sets this node's per-epoch rate limit
+config.stakeAmount = 250
+
 # Optionally customize content topics for your network
 # config.membershipContentTopic = "/my-app/rln/membership/v1"
 # config.proofMetadataContentTopic = "/my-app/rln/metadata/v1"
@@ -154,12 +158,35 @@ cache during normal proof generation when the current root still matches.
 | `rlnIdentifier`             | `"mix-rln-spam-protection/v1"` | Application identifier (must be same across network) |
 | `epochDurationSeconds`      | `10.0`                         | Duration of each epoch                               |
 | `maxEpochGap`               | `5`                            | Maximum epoch difference for valid proofs            |
-| `userMessageLimit`          | `100`                          | Max messages per member per epoch                    |
+| `stakeAmount`               | none (required)                | Declared stake (unverified); sets the rate limit     |
 | `keystorePath`              | `"rln_keystore.json"`          | Path to credentials file                             |
 | `keystorePassword`          | `""`                           | Password for keystore (empty = no persistence)       |
 | `treePath`                  | `"rln_tree.db"`                | Path for Merkle tree persistence                     |
 | `membershipContentTopic`    | `"/mix/rln/membership/v1"`     | Content topic for membership broadcasts              |
 | `proofMetadataContentTopic` | `"/mix/rln/metadata/v1"`       | Content topic for proof metadata broadcasts          |
+
+### Stake-Weighted Rate Limits
+
+A node's per-epoch rate limit is derived from its declared stake at
+registration, as specified in
+[Stake-Weighted Mix RLN DoS Protection](https://lip.logos.co/anoncomms/raw/mix-dos-protection-rln-stake-weighted.html).
+Stake is declared, not verified; until a registry enforces it, any node can
+claim any rate up to `R_max`. Peers take an announced rate on trust; the only
+check today is that the mapping could have produced it. With a registry, an
+announced rate must match the registry's record for that commitment, or
+membership is read from the registry instead of announcements.
+
+The mapping parameters are compile-time constants and must be the same across
+the network:
+
+| Constant                | Spec          | Default | Description                              |
+| ----------------------- | ------------- | ------- | ---------------------------------------- |
+| `DefaultStakeUnit`      | `S_unit`      | `1`     | Stake per message per epoch              |
+| `DefaultRateBase`       | `R_base`      | `100`   | Base rate                                |
+| `DefaultStakeTierSize`  | `T`           | `10`    | Stake tier size                          |
+| `DefaultRateMax`        | `R_max`       | `1000`  | Maximum rate, multiple of `T`, `≥ R_min` |
+| `DefaultRateMin`        | `R_min`       | `100`   | Minimum rate, `⌈R_base / T⌉ × T`         |
+| `FloorStakeAmount`      | `floor-stake` | `100`   | Minimum stake, `R_min × S_unit`          |
 
 ## Content Topics
 
@@ -176,9 +203,9 @@ config.proofMetadataContentTopic = "/my-app/rln/metadata/v1"
 Broadcasts when members join or leave:
 
 ```
-┌─────────────┬────────────────┬─────────────┐
-│ action (1B) │ commitment(32B)│ index (8B)  │
-└─────────────┴────────────────┴─────────────┘
+┌─────────────┬────────────────┬──────────────────────┬─────────────┐
+│ action (1B) │ commitment(32B)│ userMessageLimit(8B) │ index (8B)  │
+└─────────────┴────────────────┴──────────────────────┴─────────────┘
 ```
 
 ### Proof Metadata (default: `/mix/rln/metadata/v1`)
@@ -193,7 +220,7 @@ Broadcasts proof metadata for network-wide spam detection:
 
 ## Spam Detection
 
-When a member sends more than `userMessageLimit` messages in an epoch:
+When a member sends more than its `userMessageLimit` messages in an epoch:
 
 1. The nullifier log detects different Shamir shares for the same nullifier
 2. The member's secret key is recovered and logged
@@ -243,6 +270,7 @@ nim c -r --passL:/path/to/librln.a --passL:-lm tests/test_all.nim
 
 - [RLN Spam Protection for Mix Networks RFC](https://github.com/vacp2p/rfc-index/pull/252)
 - [nim-libp2p Spam Protection Interface](https://github.com/vacp2p/nim-libp2p/pull/2037)
+- [Stake-Weighted Mix RLN DoS Protection](https://lip.logos.co/anoncomms/raw/mix-dos-protection-rln-stake-weighted.html)
 - [RLN Documentation](https://rate-limiting-nullifier.github.io/rln-docs/)
 - [Zerokit](https://github.com/vacp2p/zerokit) (v2.0.2)
 - [logos-messaging-nim](https://github.com/logos-messaging/logos-messaging-nim)

@@ -741,7 +741,7 @@ proc generatePartialProofCache*(
     instance: RLNInstance,
     credential: IdentityCredential,
     memberIndex: MembershipIndex,
-    userMessageLimit: uint64 = UserMessageLimit,
+    userMessageLimit: uint64,
 ): RlnResult[PartialProofCache] =
   let (pathElements, pathIndex) = instance.imtPath(memberIndex).valueOr:
     return err(error)
@@ -805,7 +805,7 @@ proc generateRlnProofWithWitness*(
     rlnIdentifier: RlnIdentifier,
     signal: openArray[byte],
     messageId: uint = 0,
-    userMessageLimit: uint64 = UserMessageLimit,
+    userMessageLimit: uint64,
 ): RlnResult[RateLimitProof] =
   let (pathElements, pathIndex) = instance.imtPath(memberIndex).valueOr:
     return err(error)
@@ -837,7 +837,7 @@ proc finishRlnProofWithCache*(
     rlnIdentifier: RlnIdentifier,
     signal: openArray[byte],
     messageId: uint = 0,
-    userMessageLimit: uint64 = UserMessageLimit,
+    userMessageLimit: uint64,
 ): RlnResult[RateLimitProof] =
   let currentRoot = instance.getMerkleRoot().valueOr:
     return err("Failed to get current root: " & error)
