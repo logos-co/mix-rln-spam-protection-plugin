@@ -685,6 +685,9 @@ proc handleMembershipUpdate*(
 
   case update.action
   of MembershipAction.Add:
+    # The announced rate is taken on trust; validateRate only rejects values the
+    # mapping cannot produce. A registry integration must check it against the
+    # registry's record for this commitment.
     let rateCheck = validateRate(update.userMessageLimit)
     if rateCheck.isErr:
       return rateCheck

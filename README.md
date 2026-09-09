@@ -171,8 +171,13 @@ A node's per-epoch rate limit is derived from its declared stake at
 registration, as specified in
 [Stake-Weighted Mix RLN DoS Protection](https://lip.logos.co/anoncomms/raw/mix-dos-protection-rln-stake-weighted.html).
 Stake is declared, not verified; until a registry enforces it, any node can
-claim any rate up to `R_max`. The mapping parameters are compile-time constants
-and must be the same across the network:
+claim any rate up to `R_max`. Peers take an announced rate on trust; the only
+check today is that the mapping could have produced it. With a registry, an
+announced rate must match the registry's record for that commitment, or
+membership is read from the registry instead of announcements.
+
+The mapping parameters are compile-time constants and must be the same across
+the network:
 
 | Constant                | Spec          | Default | Description                              |
 | ----------------------- | ------------- | ------- | ---------------------------------------- |
