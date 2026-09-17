@@ -106,8 +106,6 @@ proc new*(
   let rlnInstance = newRLNInstance(config.rlnResourcesPath).valueOr:
     return err("Failed to create RLN instance: " & error)
 
-  # Create group manager. Its userMessageLimit is set from stake during
-  # registerSelf, or restored from the keystore on restart.
   let groupManager = newOffchainGroupManager(rlnInstance, config.membershipContentTopic)
 
   # Create nullifier log
@@ -683,9 +681,8 @@ method epochDurationSeconds*(sp: MixRlnSpamProtection): float64 {.gcsafe, raises
 
 method rateLimitBudget*(sp: MixRlnSpamProtection): int {.gcsafe, raises: [].} =
   ## Returns the per-node rate limit, or 0 until registerSelf has computed it
-  ## from stake (or init has restored it from the keystore). The libp2p
-  ## interface mandates int return; the cast is safe because constants.nim
-  ## asserts DefaultRateMax <= high(int).
+  ## from stake (or init has restored it from the keystore). The int cast is
+  ## safe because constants.nim asserts DefaultRateMax <= high(int).
   int(sp.groupManager.userMessageLimit)
 
 # Coordination layer handlers

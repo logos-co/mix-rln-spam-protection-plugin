@@ -56,16 +56,11 @@ const
     ## Default stake required per message per epoch (spec: S_unit).
 
   DefaultStakeTierSize* = 10'u64
-    ## Default stake tier size (spec: T >= 1). Each tier corresponds to a
-    ## stake increment of DefaultStakeTierSize * DefaultStakeUnit and a rate
-    ## increment of DefaultStakeTierSize, so registered rates cluster at
-    ## multiples of it (T >= 10 recommended for registered-stake privacy).
+    ## Default stake tier size (spec: T); T >= 10 for registered-stake privacy.
 
   DefaultRateMax* = 1000'u64
-    ## Default maximum rate cap regardless of stake (spec: R_max), a published
-    ## deployment constant. The spec requires a multiple of DefaultStakeTierSize
-    ## and at least DefaultRateMin; both are asserted below. 10 * DefaultRateBase
-    ## is the spec's suggested starting point.
+    ## Default maximum rate (spec: R_max); 10 * DefaultRateBase, the spec's
+    ## suggested starting point.
 
   # Root validation
   AcceptableRootWindowSize* = 5
@@ -105,15 +100,12 @@ static:
 const
   DefaultRateMin* =
     ceilDiv(DefaultRateBase, DefaultStakeTierSize) * DefaultStakeTierSize
-    ## Default minimum rate (spec: R_min), the smallest multiple of
-    ## DefaultStakeTierSize >= DefaultRateBase. Nodes with
-    ## stakeAmount < FloorStakeAmount are rejected.
+    ## Default minimum rate (spec: R_min).
 
   FloorStakeAmount* = DefaultRateMin * DefaultStakeUnit
     ## Minimum stake required to register (spec: floor-stake).
 
 static:
-  # Validate DefaultRateMax against the derived minimum.
   doAssert DefaultRateMax >= DefaultRateMin,
     "DefaultRateMax (" & $DefaultRateMax & ") must be >= DefaultRateMin (" &
       $DefaultRateMin & ")"

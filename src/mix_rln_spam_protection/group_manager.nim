@@ -90,8 +90,7 @@ proc hash*(node: MerkleNode): Hash =
 # Validation helpers
 
 proc validateRate*(userMessageLimit: uint64): RlnResult[void] =
-  ## Reject rates the stake-to-rate mapping cannot produce: outside
-  ## [DefaultRateMin, DefaultRateMax] or not a multiple of DefaultStakeTierSize.
+  ## Reject rates the stake-to-rate mapping cannot produce.
   if userMessageLimit < DefaultRateMin or userMessageLimit > DefaultRateMax:
     return err(
       "userMessageLimit (" & $userMessageLimit &
@@ -106,10 +105,7 @@ proc validateRate*(userMessageLimit: uint64): RlnResult[void] =
   ok()
 
 proc computeUserMessageLimit*(stakeAmount: uint64): RlnResult[uint64] =
-  ## Compute a member's userMessageLimit from stake. Returns
-  ## min(floor(stakeAmount / (DefaultStakeTierSize * DefaultStakeUnit)) *
-  ## DefaultStakeTierSize, DefaultRateMax), quantizing rates to multiples of
-  ## the tier size, or err if stakeAmount < FloorStakeAmount.
+  ## Stake-to-rate mapping (spec §4.1).
   if stakeAmount < FloorStakeAmount:
     return err(
       "stakeAmount (" & $stakeAmount & ") must be >= FloorStakeAmount (" &
@@ -386,8 +382,6 @@ proc newOffchainGroupManager*(
 ): OffchainGroupManager =
   ## Create a new offchain group manager.
   ## The membershipContentTopic can be customized for different networks.
-  ## The node's userMessageLimit starts at 0 and is set by register from stake,
-  ## or from the keystore on restart.
   OffchainGroupManager(
     rlnInstance: rlnInstance,
     credentials: none(IdentityCredential),
@@ -513,12 +507,10 @@ proc registerWithStake*(
     index = index, stakeAmount = stakeAmount, userMessageLimit = userMessageLimit
   gm.nextIndex += 1
 
-  # Insert rateCommitment into RLN tree
   let insertResult = gm.rlnInstance.insertMemberAt(index, rateCommitment)
   if insertResult.isErr:
     return err("Failed to insert member: " & insertResult.error)
 
-  # Update local tracking
   gm.membershipByIdCommitment[commitment] = index
   gm.membershipByIndex[index] = commitment
   gm.rateLimitByIdCommitment[commitment] = userMessageLimit
@@ -527,7 +519,6 @@ proc registerWithStake*(
   gm.updateRootTrackerOrLog()
   gm.refreshProofCacheOrLog()
 
-  # Broadcast membership update with the member's rate
   if gm.publishCallback.isSome:
     let update = MembershipUpdate(
       action: MembershipAction.Add,
