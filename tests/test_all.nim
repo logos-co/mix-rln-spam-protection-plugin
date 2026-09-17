@@ -1103,6 +1103,36 @@ suite "Partial Proof Cache and Root Tracking":
     # A short buffer is caught by the header-length guard, ahead of any read.
     check gm.loadTreeSnapshot(newSeq[byte](12)).isErr
 
+  test "Rejected snapshot leaves the loaded group untouched":
+    let rln = newRLNInstance()
+    check rln.isOk
+    let gm = newOffchainGroupManager(rln.get())
+    check (waitFor gm.init()).isOk
+    check (waitFor gm.start()).isOk
+
+    let creds = generateCredentials()
+    check creds.isOk
+    check (waitFor gm.register(creds.get(), TestStakeAmount1)).isOk
+    let rootBefore = gm.rlnInstance.getMerkleRoot()
+    check rootBefore.isOk
+
+    # Two entries, the second with a rate the mapping cannot produce. Without
+    # validating up front the first entry lands and the root window is emptied.
+    var hostile = newSeq[byte](16 + 2 * 48)
+    hostile[0] = 2 # member_count = 2
+    hostile[8] = 2 # next_index = 2
+    for i in 0 ..< 32:
+      hostile[16 + i] = byte(i + 1) # first commitment
+      hostile[64 + i] = byte(i + 2) # second commitment
+    hostile[56] = byte(TestRate1) # first rate, valid
+    hostile[72] = 1 # second index = 1
+    hostile[80] = 7 # second rate = 7, rejected
+    check gm.loadTreeSnapshot(hostile).isErr
+
+    check gm.getMemberCount() == 1
+    check gm.getMemberRateLimit(creds.get().idCommitment) == some(TestRate1)
+    check gm.validateRoot(rootBefore.get())
+
   test "Snapshot with an out-of-range member rate is rejected":
     let rln = newRLNInstance()
     check rln.isOk

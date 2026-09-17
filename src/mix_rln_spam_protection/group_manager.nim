@@ -787,6 +787,13 @@ const
   SnapshotHeaderSize = 16 # member_count (8) + next_index (8)
   SnapshotMemberSize = 48 # commitment (32) + index (8) + userMessageLimit (8)
 
+type SnapshotEntry = object
+  ## One validated member entry, held until the whole snapshot has been read.
+  idCommitment: IDCommitment
+  index: MembershipIndex
+  userMessageLimit: uint64
+  rateCommitment: IDCommitment
+
 # Note: writeUint64LE and readUint64LE are imported from bytes_utils via types
 
 proc serializeTreeSnapshot*(gm: OffchainGroupManager): seq[byte] =
@@ -860,26 +867,19 @@ proc loadTreeSnapshot*(gm: OffchainGroupManager, data: seq[byte]): RlnResult[voi
 
   trace "Loading tree snapshot", memberCount = memberCount, nextIndex = nextIndex
 
-  # Clear existing state before loading
-  gm.membershipByIdCommitment.clear()
-  gm.membershipByIndex.clear()
-  gm.rateLimitByIdCommitment.clear()
-  gm.rootTracker.resetRoots()
-
-  # Load each member
+  # Read and validate every entry before touching any state, so a bad
+  # snapshot leaves the current group intact.
+  var entries = newSeqOfCap[SnapshotEntry](memberCount)
   for i in 0 ..< memberCount:
-    # Read idCommitment
     var idCommitment: IDCommitment
     copyMem(addr idCommitment[0], unsafeAddr data[offset], HashByteSize)
     offset += HashByteSize
 
-    # Read index
     let rawIndex = data.readUint64LE(offset).valueOr:
       return err("Invalid snapshot: " & error)
     let index = MembershipIndex(rawIndex)
     offset += Uint64ByteSize
 
-    # Read userMessageLimit
     let userMessageLimit = data.readUint64LE(offset).valueOr:
       return err("Invalid snapshot: " & error)
     offset += Uint64ByteSize
@@ -890,23 +890,35 @@ proc loadTreeSnapshot*(gm: OffchainGroupManager, data: seq[byte]): RlnResult[voi
     if rateCheck.isErr:
       return err("Invalid snapshot: " & rateCheck.error)
 
-    # Compute rate commitment for the RLN tree using the stored userMessageLimit
-    # Tree stores: rate_commitment = Poseidon(id_commitment, user_message_limit)
     let rateCommitment = computeRateCommitment(idCommitment, userMessageLimit).valueOr:
       error "Failed to compute rate commitment during snapshot load", index = index
       return err("Failed to compute rate commitment: " & error)
 
-    # Insert into RLN Merkle tree
-    let insertResult = gm.rlnInstance.insertMemberAt(index, rateCommitment)
+    entries.add(
+      SnapshotEntry(
+        idCommitment: idCommitment,
+        index: index,
+        userMessageLimit: userMessageLimit,
+        rateCommitment: rateCommitment,
+      )
+    )
+
+  gm.membershipByIdCommitment.clear()
+  gm.membershipByIndex.clear()
+  gm.rateLimitByIdCommitment.clear()
+  gm.rootTracker.resetRoots()
+
+  for entry in entries:
+    let insertResult = gm.rlnInstance.insertMemberAt(entry.index, entry.rateCommitment)
     if insertResult.isErr:
       error "Failed to insert member from snapshot",
-        index = index, error = insertResult.error
+        index = entry.index, error = insertResult.error
       return err("Failed to insert member: " & insertResult.error)
 
-    # Update tracking tables - track by idCommitment for spam recovery
-    gm.membershipByIdCommitment[idCommitment] = index
-    gm.membershipByIndex[index] = idCommitment
-    gm.rateLimitByIdCommitment[idCommitment] = userMessageLimit
+    # Track by idCommitment for spam recovery
+    gm.membershipByIdCommitment[entry.idCommitment] = entry.index
+    gm.membershipByIndex[entry.index] = entry.idCommitment
+    gm.rateLimitByIdCommitment[entry.idCommitment] = entry.userMessageLimit
 
   gm.nextIndex = MembershipIndex(nextIndex)
 
