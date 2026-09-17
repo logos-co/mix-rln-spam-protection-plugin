@@ -483,17 +483,14 @@ proc hasMemberByIdCommitment*(
   ## Check if a member with the given identity commitment is already registered.
   gm.membershipByIdCommitment.hasKey(idCommitment)
 
-proc registerWithStake*(
+proc insertMember(
     gm: OffchainGroupManager, commitment: IDCommitment, stakeAmount: uint64
-): Future[RlnResult[MembershipIndex]] {.async.} =
-  ## Register an external member at the rate derived from its stake.
-  if not gm.isInitialized:
-    return err("Group manager not initialized")
-
+): RlnResult[(MembershipIndex, uint64)] =
+  ## Insert a member at the rate derived from its stake, at the next free
+  ## index. Returns the index and the rate.
   let userMessageLimit = computeUserMessageLimit(stakeAmount).valueOr:
     return err("Failed to compute rate limit: " & error)
 
-  # Check if already registered by idCommitment
   if gm.membershipByIdCommitment.hasKey(commitment):
     return err("Member already registered")
 
@@ -502,65 +499,7 @@ proc registerWithStake*(
     return err("Failed to compute rate commitment: " & error)
 
   let index = gm.nextIndex
-  trace "Registering member with stake",
-    index = index, stakeAmount = stakeAmount, userMessageLimit = userMessageLimit
-  gm.nextIndex += 1
-
-  let insertResult = gm.rlnInstance.insertMemberAt(index, rateCommitment)
-  if insertResult.isErr:
-    return err("Failed to insert member: " & insertResult.error)
-
-  gm.membershipByIdCommitment[commitment] = index
-  gm.membershipByIndex[index] = commitment
-  gm.rateLimitByIdCommitment[commitment] = userMessageLimit
-
-  # Update root tracker
-  gm.updateRootTrackerOrLog()
-  gm.refreshProofCacheOrLog()
-
-  if gm.publishCallback.isSome:
-    let update = MembershipUpdate(
-      action: MembershipAction.Add,
-      idCommitment: commitment,
-      userMessageLimit: userMessageLimit,
-      index: index,
-    )
-    let data = update.toBytes()
-    (await gm.publishCallback.get()(gm.membershipContentTopic, data)).isOkOr:
-      warn "Failed to broadcast membership update", error = error
-
-  if gm.onRegister.isSome:
-    await gm.onRegister.get()(commitment, index)
-
-  debug "Member registered with stake",
-    index = index, stakeAmount = stakeAmount, userMessageLimit = userMessageLimit
-  ok(index)
-
-method register*(
-    gm: OffchainGroupManager, credentials: IdentityCredential, stakeAmount: uint64
-): Future[RlnResult[MembershipIndex]] {.async.} =
-  ## Register self at the rate derived from stake.
-  if not gm.isInitialized:
-    return err("Group manager not initialized")
-
-  # Already registered? Check membershipIndex, not credentials: init() sets
-  # credentials before registration in ephemeral mode.
-  if gm.membershipIndex.isSome:
-    return err("Already registered with index " & $gm.membershipIndex.get())
-
-  let userMessageLimit = computeUserMessageLimit(stakeAmount).valueOr:
-    return err("Failed to compute rate limit: " & error)
-
-  let commitment = credentials.idCommitment
-  if gm.membershipByIdCommitment.hasKey(commitment):
-    return err("Member already registered")
-
-  # Compute rate commitment
-  let rateCommitment = computeRateCommitment(commitment, userMessageLimit).valueOr:
-    return err("Failed to compute rate commitment: " & error)
-
-  let index = gm.nextIndex
-  trace "Registering self",
+  trace "Inserting member",
     index = index, stakeAmount = stakeAmount, userMessageLimit = userMessageLimit
   gm.nextIndex += 1
 
@@ -573,11 +512,16 @@ method register*(
   gm.membershipByIdCommitment[commitment] = index
   gm.membershipByIndex[index] = commitment
   gm.rateLimitByIdCommitment[commitment] = userMessageLimit
-  gm.userMessageLimit = userMessageLimit
-  gm.credentials = some(credentials)
-  gm.membershipIndex = some(index)
 
-  # Update root tracker
+  ok((index, userMessageLimit))
+
+proc announceMember(
+    gm: OffchainGroupManager,
+    commitment: IDCommitment,
+    index: MembershipIndex,
+    userMessageLimit: uint64,
+) {.async.} =
+  ## Refresh local state for an inserted member and broadcast the addition.
   gm.updateRootTrackerOrLog()
   gm.refreshProofCacheOrLog()
 
@@ -595,6 +539,42 @@ method register*(
 
   if gm.onRegister.isSome:
     await gm.onRegister.get()(commitment, index)
+
+proc registerWithStake*(
+    gm: OffchainGroupManager, commitment: IDCommitment, stakeAmount: uint64
+): Future[RlnResult[MembershipIndex]] {.async.} =
+  ## Register an external member at the rate derived from its stake.
+  if not gm.isInitialized:
+    return err("Group manager not initialized")
+
+  let (index, userMessageLimit) = ?gm.insertMember(commitment, stakeAmount)
+  await gm.announceMember(commitment, index, userMessageLimit)
+
+  debug "Member registered with stake",
+    index = index, stakeAmount = stakeAmount, userMessageLimit = userMessageLimit
+  ok(index)
+
+method register*(
+    gm: OffchainGroupManager, credentials: IdentityCredential, stakeAmount: uint64
+): Future[RlnResult[MembershipIndex]] {.async.} =
+  ## Register self at the rate derived from stake.
+  if not gm.isInitialized:
+    return err("Group manager not initialized")
+
+  # Already registered? Check membershipIndex, not credentials: init() sets
+  # credentials before registration in ephemeral mode.
+  if gm.membershipIndex.isSome:
+    return err("Already registered with index " & $gm.membershipIndex.get())
+
+  let commitment = credentials.idCommitment
+  let (index, userMessageLimit) = ?gm.insertMember(commitment, stakeAmount)
+
+  # Set before announceMember so the proof cache is built for this member.
+  gm.userMessageLimit = userMessageLimit
+  gm.credentials = some(credentials)
+  gm.membershipIndex = some(index)
+
+  await gm.announceMember(commitment, index, userMessageLimit)
 
   debug "Self registered",
     index = index, stakeAmount = stakeAmount, userMessageLimit = userMessageLimit
