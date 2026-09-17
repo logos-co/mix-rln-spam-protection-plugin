@@ -53,7 +53,7 @@ const
   DefaultStakeUnit* = 1'u64
     ## Default stake required per message per epoch (spec: S_unit).
 
-  DefaultStakeTierSize* = 10'u64
+  DefaultStakeTierSize* = 100'u64
     ## Default stake tier size (spec: T); T >= 10 for registered-stake privacy.
 
   DefaultRateMax* = 1000'u64

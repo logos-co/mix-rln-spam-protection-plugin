@@ -95,7 +95,7 @@ var config = defaultConfig()
 config.keystorePassword = "my-secure-password"
 
 # Declared stake; sets this node's per-epoch rate limit
-config.stakeAmount = 250
+config.stakeAmount = 250 # registers at rate 200, the tier below
 
 # Optionally customize content topics for your network
 # config.membershipContentTopic = "/my-app/rln/membership/v1"
@@ -183,7 +183,7 @@ the network:
 | ----------------------- | ------------- | ------- | ---------------------------------------- |
 | `DefaultStakeUnit`      | `S_unit`      | `1`     | Stake per message per epoch              |
 | `DefaultRateBase`       | `R_base`      | `100`   | Base rate                                |
-| `DefaultStakeTierSize`  | `T`           | `10`    | Stake tier size                          |
+| `DefaultStakeTierSize`  | `T`           | `100`   | Stake tier size                          |
 | `DefaultRateMax`        | `R_max`       | `1000`  | Maximum rate, multiple of `T`, `≥ R_min` |
 | `DefaultRateMin`        | `R_min`       | `100`   | Minimum rate, `⌈R_base / T⌉ × T`         |
 | `FloorStakeAmount`      | `floor-stake` | `100`   | Minimum stake, `R_min × S_unit`          |

@@ -20,7 +20,7 @@
 ## var config = defaultConfig()
 ## config.rlnIdentifier = myRlnIdentifier  # Must be same across all nodes
 ## config.keystorePassword = "my-password"
-## config.stakeAmount = 250  # Declared stake; sets the per-epoch rate limit
+## config.stakeAmount = 250  # Declared stake; registers at rate 200, the tier below
 ##
 ## # Create and initialize plugin
 ## let plugin = MixRlnSpamProtection.new(config).get()
