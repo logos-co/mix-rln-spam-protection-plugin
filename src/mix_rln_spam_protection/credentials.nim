@@ -36,8 +36,7 @@ type
     ciphertext: seq[byte] # Encrypted IdentityCredential
     membershipIndex: Option[MembershipIndex]
     userMessageLimit: Option[uint64]
-      # Stake-derived rate limit at registration; required to recompute
-      # the member's rateCommitment on restart
+      # Rate at registration; the leaf is rebuilt from it on restart
 
   # Keystore containing multiple credentials
   Keystore* = object

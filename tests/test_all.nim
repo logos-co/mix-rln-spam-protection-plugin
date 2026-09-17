@@ -33,21 +33,12 @@ import std/unittest
 # =============================================================================
 
 const
-  # Two distinct stake amounts for tests. Single-member tests can pick either
-  # (TestStakeAmount1 by default); multi-member tests use both to exercise
-  # multi-rate scenarios. Tests compute the per-epoch rate via
-  # computeUserMessageLimit.
+  # Two stake amounts so multi-member tests can register at different rates
   TestStakeAmount1* = 100'u64 * DefaultStakeUnit
-    ## Yields rate = 100 with DefaultStakeUnit=1 and DefaultStakeTierSize=10.
-
   TestStakeAmount2* = 200'u64 * DefaultStakeUnit
-    ## Yields rate = 200 with DefaultStakeUnit=1 and DefaultStakeTierSize=10.
 
   TestRate1* = computeUserMessageLimit(TestStakeAmount1).get()
-    ## Stake-derived rate for TestStakeAmount1 (100 with the default parameters)
-
   TestRate2* = computeUserMessageLimit(TestStakeAmount2).get()
-    ## Stake-derived rate for TestStakeAmount2 (200 with the default parameters)
 
   # Membership index - used across multiple tests
   TestMemberIndex* = 0'u64 ## Default membership index for single-member tests

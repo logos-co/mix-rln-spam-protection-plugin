@@ -223,7 +223,7 @@ method stop*(gm: GroupManager): Future[void] {.base, async.} =
 method register*(
     gm: GroupManager, credentials: IdentityCredential, stakeAmount: uint64
 ): Future[RlnResult[MembershipIndex]] {.base, async.} =
-  ## Register self with the given credentials at the rate derived from stake.
+  ## Register self at the rate derived from stake.
   return err("register with credentials must be implemented by concrete type")
 
 method withdraw*(
@@ -487,7 +487,6 @@ proc registerWithStake*(
     gm: OffchainGroupManager, commitment: IDCommitment, stakeAmount: uint64
 ): Future[RlnResult[MembershipIndex]] {.async.} =
   ## Register an external member at the rate derived from its stake.
-  ## Used by setup scripts that seed a tree with several members.
   if not gm.isInitialized:
     return err("Group manager not initialized")
 
@@ -498,7 +497,7 @@ proc registerWithStake*(
   if gm.membershipByIdCommitment.hasKey(commitment):
     return err("Member already registered")
 
-  # Compute rate commitment = Poseidon(idCommitment, userMessageLimit)
+  # Compute rate commitment
   let rateCommitment = computeRateCommitment(commitment, userMessageLimit).valueOr:
     return err("Failed to compute rate commitment: " & error)
 
@@ -530,7 +529,6 @@ proc registerWithStake*(
     (await gm.publishCallback.get()(gm.membershipContentTopic, data)).isOkOr:
       warn "Failed to broadcast membership update", error = error
 
-  # Call callback
   if gm.onRegister.isSome:
     await gm.onRegister.get()(commitment, index)
 
@@ -541,13 +539,12 @@ proc registerWithStake*(
 method register*(
     gm: OffchainGroupManager, credentials: IdentityCredential, stakeAmount: uint64
 ): Future[RlnResult[MembershipIndex]] {.async.} =
-  ## Register self with the given credentials at the rate derived from stake.
+  ## Register self at the rate derived from stake.
   if not gm.isInitialized:
     return err("Group manager not initialized")
 
-  # Check if already registered (by checking if we have a membership index)
-  # Note: credentials may be set during init() for ephemeral mode, so we check
-  # membershipIndex instead to determine if we're actually registered in the tree.
+  # Already registered? Check membershipIndex, not credentials: init() sets
+  # credentials before registration in ephemeral mode.
   if gm.membershipIndex.isSome:
     return err("Already registered with index " & $gm.membershipIndex.get())
 
@@ -558,8 +555,7 @@ method register*(
   if gm.membershipByIdCommitment.hasKey(commitment):
     return err("Member already registered")
 
-  # Compute rate commitment = Poseidon(idCommitment, userMessageLimit)
-  # This is the actual leaf value stored in the RLN Merkle tree
+  # Compute rate commitment
   let rateCommitment = computeRateCommitment(commitment, userMessageLimit).valueOr:
     return err("Failed to compute rate commitment: " & error)
 
@@ -568,12 +564,12 @@ method register*(
     index = index, stakeAmount = stakeAmount, userMessageLimit = userMessageLimit
   gm.nextIndex += 1
 
-  # Insert rateCommitment into RLN tree (this is the actual leaf value)
+  # Insert rateCommitment into RLN tree
   let insertResult = gm.rlnInstance.insertMemberAt(index, rateCommitment)
   if insertResult.isErr:
     return err("Failed to insert member: " & insertResult.error)
 
-  # Update local tracking - track by idCommitment for spam recovery
+  # Track by idCommitment for spam recovery
   gm.membershipByIdCommitment[commitment] = index
   gm.membershipByIndex[index] = commitment
   gm.rateLimitByIdCommitment[commitment] = userMessageLimit
@@ -585,7 +581,7 @@ method register*(
   gm.updateRootTrackerOrLog()
   gm.refreshProofCacheOrLog()
 
-  # Broadcast membership update with idCommitment + userMessageLimit (like waku-rln-relay)
+  # Broadcast membership update (like waku-rln-relay)
   if gm.publishCallback.isSome:
     let update = MembershipUpdate(
       action: MembershipAction.Add,
@@ -597,7 +593,6 @@ method register*(
     (await gm.publishCallback.get()(gm.membershipContentTopic, data)).isOkOr:
       warn "Failed to broadcast membership update", error = error
 
-  # Call callback
   if gm.onRegister.isSome:
     await gm.onRegister.get()(commitment, index)
 
@@ -622,9 +617,7 @@ method withdraw*(
   if deleteResult.isErr:
     return err("Failed to delete member: " & deleteResult.error)
 
-  # Read the member's rate before its table entry is deleted below. The Remove
-  # broadcast carries it, but handleMembershipUpdate only uses the index. A
-  # rate of 0 means the tracking tables are out of sync.
+  # Receivers ignore the rate on Remove; 0 means the tables are out of sync.
   let memberRateLimit = gm.rateLimitByIdCommitment.getOrDefault(idCommitment)
   if memberRateLimit == 0:
     error "Missing per-member rate limit during withdraw",
@@ -785,8 +778,6 @@ proc getMemberIdCommitment*(
 proc getMemberRateLimit*(
     gm: OffchainGroupManager, idCommitment: IDCommitment
 ): Option[uint64] {.raises: [].} =
-  ## Get the rate limit of a member by idCommitment.
-  ## Returns none if the member is not registered.
   if gm.rateLimitByIdCommitment.hasKey(idCommitment):
     some(gm.rateLimitByIdCommitment.getOrDefault(idCommitment))
   else:

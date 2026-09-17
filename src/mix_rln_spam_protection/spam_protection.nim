@@ -298,10 +298,6 @@ proc registerSelf*(
     sp: MixRlnSpamProtection
 ): Future[RlnResult[MembershipIndex]] {.async.} =
   ## Register this node's credentials with the group at a stake-derived rate.
-  ##
-  ## Registers with config.stakeAmount, from which the group manager derives
-  ## userMessageLimit, and stores that limit in the keystore so a restart
-  ## rebuilds the same leaf.
 
   if sp.state == PluginState.Uninitialized:
     return err("Plugin not initialized")
@@ -311,7 +307,7 @@ proc registerSelf*(
 
   let creds = sp.groupManager.credentials.get()
 
-  # Idempotent path: already registered (e.g. restored from keystore on restart).
+  # Already registered, e.g. restored from the keystore on restart.
   if sp.groupManager.membershipIndex.isSome:
     # Warn on rate drift. Continue using the registered rate (network source of
     # truth); changing rate requires re-registration.

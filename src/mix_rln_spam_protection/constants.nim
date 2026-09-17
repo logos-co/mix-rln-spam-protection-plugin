@@ -49,8 +49,6 @@ const
   # Stake-weighted rate limiting parameters
   DefaultRateBase* = 100'u64
     ## Default flat per-node rate limit per epoch (spec: R_base).
-    ## Used only to derive DefaultRateMin; under stake-weighted
-    ## registration, userMessageLimit is computed from stake.
 
   DefaultStakeUnit* = 1'u64
     ## Default stake required per message per epoch (spec: S_unit).
@@ -89,7 +87,7 @@ const
     ## Default path for the credentials keystore.
 
 static:
-  # Validate the stake-weighted inputs before anything is derived from them.
+  # Validate the stake-weighted inputs
   doAssert DefaultStakeUnit > 0,
     "DefaultStakeUnit (" & $DefaultStakeUnit & ") must be > 0"
   doAssert DefaultRateBase >= 1,
