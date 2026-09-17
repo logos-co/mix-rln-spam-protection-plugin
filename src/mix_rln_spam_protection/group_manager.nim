@@ -884,8 +884,13 @@ proc loadTreeSnapshot*(gm: OffchainGroupManager, data: seq[byte]): RlnResult[voi
       return err("Invalid snapshot: " & error)
     offset += Uint64ByteSize
 
-    # Snapshot contents are untrusted; admit only rates the stake-to-rate
-    # mapping can produce.
+    # Snapshot contents are untrusted; admit only in-range indices and rates
+    # the stake-to-rate mapping can produce.
+    if index >= MerkleTreeCapacity:
+      return err(
+        "Invalid snapshot: membership index (" & $index &
+          ") must be < MerkleTreeCapacity (" & $MerkleTreeCapacity & ")"
+      )
     let rateCheck = validateRate(userMessageLimit)
     if rateCheck.isErr:
       return err("Invalid snapshot: " & rateCheck.error)

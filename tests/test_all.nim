@@ -1133,6 +1133,14 @@ suite "Partial Proof Cache and Root Tracking":
     check gm.getMemberRateLimit(creds.get().idCommitment) == some(TestRate1)
     check gm.validateRoot(rootBefore.get())
 
+    # Same shape with a valid rate but an index beyond the tree capacity.
+    hostile[80] = byte(TestRate1)
+    hostile[72] = 0
+    hostile[74] = 0x10 # second index = 2^20 = MerkleTreeCapacity
+    check gm.loadTreeSnapshot(hostile).isErr
+    check gm.getMemberCount() == 1
+    check gm.validateRoot(rootBefore.get())
+
   test "Snapshot with an out-of-range member rate is rejected":
     let rln = newRLNInstance()
     check rln.isOk
