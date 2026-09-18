@@ -110,7 +110,7 @@ proc start*(nl: NullifierLog) =
   nl.cleanupTask = nl.cleanupLoop()
   info "Nullifier log started"
 
-proc stop*(nl: NullifierLog) {.async.} =
+proc stop*(nl: NullifierLog) {.async: (raises: []).} =
   ## Stop the nullifier log cleanup task.
   if not nl.running:
     return

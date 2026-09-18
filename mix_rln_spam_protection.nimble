@@ -17,7 +17,7 @@ requires "json_serialization >= 0.2.0"
 
 # Keep the plugin and standalone Mix facade on compatible libp2p/Mix APIs.
 requires "libp2p == 2.3.1"
-requires "https://github.com/richard-ramos/nim-libp2p-mix#57def1fef5763fc4cc27a386276cd65165eeb489"
+requires "https://github.com/richard-ramos/nim-libp2p-mix#29eaaf1d6adb57fa95e70d0c577cf6c4855598d9"
 
 # Tasks
 task test, "Run tests":
