@@ -1337,7 +1337,7 @@ when defined(metrics):
   suite "Metrics":
     test "metrics track proof lifecycle, rejections and group size":
       var config = defaultConfig()
-      config.userMessageLimit = int(TestUserMessageLimit)
+      config.stakeAmount = TestStakeAmount1
 
       let sp = MixRlnSpamProtection.new(config).get()
       check (waitFor sp.init()).isOk
@@ -1410,7 +1410,7 @@ when defined(metrics):
 
       # Proof verified against a different tree: root not in the valid
       # window, reason=stale_root
-      let sp2 = MixRlnSpamProtection.new(defaultConfig()).get()
+      let sp2 = MixRlnSpamProtection.new(config).get()
       check (waitFor sp2.init()).isOk
       check (waitFor sp2.registerSelf()).isOk
       check (waitFor sp2.start()).isOk

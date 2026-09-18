@@ -973,6 +973,7 @@ proc loadTreeSnapshot*(gm: OffchainGroupManager, data: seq[byte]): RlnResult[voi
     gm.membershipByIdCommitment[entry.idCommitment] = entry.index
     gm.membershipByIndex[entry.index] = entry.idCommitment
     gm.rateLimitByIdCommitment[entry.idCommitment] = entry.userMessageLimit
+    gm.updateGroupSizeMetric()
 
   gm.nextIndex = MembershipIndex(nextIndex)
   gm.updateGroupSizeMetric()
