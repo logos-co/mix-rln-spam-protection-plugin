@@ -1,5 +1,8 @@
 # Mix RLN Spam Protection Plugin
 
+
+For a shared `liblogos_rln_module` backend, see the [asynchronous module adapter](docs/module-api.md). The remaining setup below describes the legacy embedded provider.
+
 RLN-based spam protection plugin for libp2p mix networks. This plugin implements [Rate Limiting Nullifiers (RLN)](https://rate-limiting-nullifier.github.io/rln-docs/) to provide proof generation and verification primitives.
 
 ## Overview
