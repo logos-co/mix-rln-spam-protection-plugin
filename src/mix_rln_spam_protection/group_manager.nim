@@ -534,11 +534,11 @@ proc insertMember(
 ): RlnResult[(MembershipIndex, uint64)] =
   ## Insert a member at the rate derived from its stake, at the next free
   ## index. Returns the index and the rate.
-  let userMessageLimit = computeUserMessageLimit(stakeAmount).valueOr:
-    return err("Failed to compute rate limit: " & error)
-
   if gm.membershipByIdCommitment.hasKey(commitment):
     return err("Member already registered")
+
+  let userMessageLimit = computeUserMessageLimit(stakeAmount).valueOr:
+    return err("Failed to compute rate limit: " & error)
 
   # Compute rate commitment
   let rateCommitment = computeRateCommitment(commitment, userMessageLimit).valueOr:
@@ -547,12 +547,12 @@ proc insertMember(
   let index = gm.nextIndex
   trace "Inserting member",
     index = index, stakeAmount = stakeAmount, userMessageLimit = userMessageLimit
-  gm.nextIndex += 1
 
   # Insert rateCommitment into RLN tree
   let insertResult = gm.rlnInstance.insertMemberAt(index, rateCommitment)
   if insertResult.isErr:
     return err("Failed to insert member: " & insertResult.error)
+  gm.nextIndex += 1
 
   # Track by idCommitment for spam recovery
   gm.membershipByIdCommitment[commitment] = index
