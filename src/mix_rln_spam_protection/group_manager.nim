@@ -398,7 +398,8 @@ method verifyProof*(
 
   let validRoots = gm.rootTracker.getValidRoots()
   let verifyStart = Moment.now()
-  let verifyResult = gm.rlnInstance.verifyRlnProof(proof, rlnIdentifier, signal, validRoots)
+  let verifyResult =
+    gm.rlnInstance.verifyRlnProof(proof, rlnIdentifier, signal, validRoots)
   if verifyResult.isOk:
     mix_rln_proof_verification_duration_seconds.observe(
       (Moment.now() - verifyStart).nanoseconds.float / 1e9

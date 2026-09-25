@@ -411,7 +411,7 @@ suite "Nullifier Log":
     # Epoch still accepted, so the entry is kept and a conflict = SPAM
     for i in 0 .. 1:
       var conflict = entries[i]
-      conflict.shareX[0] = 100  # Different share
+      conflict.shareX[0] = 100 # Different share
 
       let result = nl.checkAndInsert(conflict)
       check result.isSpam
@@ -1317,22 +1317,30 @@ when defined(metrics):
     except ValueError:
       0.0
 
-  proc histCount(h: Histogram, series: string, labels: openArray[string] = []): float64 =
+  proc histCount(
+      h: Histogram, series: string, labels: openArray[string] = []
+  ): float64 =
     try:
       h.valueByName(series, labels)
     except ValueError:
       0.0
 
   proc totalGenerations(): float64 =
-    histCount(mix_rln_proof_generation_duration_seconds,
-      "mix_rln_proof_generation_duration_seconds_count", ["cached"]) +
-    histCount(mix_rln_proof_generation_duration_seconds,
-      "mix_rln_proof_generation_duration_seconds_count", ["full"])
+    histCount(
+      mix_rln_proof_generation_duration_seconds,
+      "mix_rln_proof_generation_duration_seconds_count",
+      ["cached"],
+    ) +
+      histCount(
+        mix_rln_proof_generation_duration_seconds,
+        "mix_rln_proof_generation_duration_seconds_count",
+        ["full"],
+      )
 
   proc totalGenFailures(): float64 =
     labeledValue(mix_rln_proof_generation_failures_total, ["not_ready"]) +
-    labeledValue(mix_rln_proof_generation_failures_total, ["tree_state"]) +
-    labeledValue(mix_rln_proof_generation_failures_total, ["witness_generation"])
+      labeledValue(mix_rln_proof_generation_failures_total, ["tree_state"]) +
+      labeledValue(mix_rln_proof_generation_failures_total, ["witness_generation"])
 
   suite "Metrics":
     test "metrics track proof lifecycle, rejections and group size":
@@ -1373,8 +1381,10 @@ when defined(metrics):
         errorBefore = labeledValue(mix_rln_proof_verifications_total, ["error"])
         duplicateBefore = labeledValue(mix_rln_messages_rejected_total, ["duplicate"])
         staleRootBefore = labeledValue(mix_rln_messages_rejected_total, ["stale_root"])
-        verifDurBefore = histCount(mix_rln_proof_verification_duration_seconds,
-          "mix_rln_proof_verification_duration_seconds_count")
+        verifDurBefore = histCount(
+          mix_rln_proof_verification_duration_seconds,
+          "mix_rln_proof_verification_duration_seconds_count",
+        )
 
       # Valid verification: outcome=valid, duration observed
       let verifyResult = sp.verifyProof(proofBytes, bindingData)
@@ -1382,8 +1392,10 @@ when defined(metrics):
       check verifyResult.get() == true
       check labeledValue(mix_rln_proof_verifications_total, ["valid"]) ==
         validBefore + 1.0
-      check histCount(mix_rln_proof_verification_duration_seconds,
-        "mix_rln_proof_verification_duration_seconds_count") == verifDurBefore + 1.0
+      check histCount(
+        mix_rln_proof_verification_duration_seconds,
+        "mix_rln_proof_verification_duration_seconds_count",
+      ) == verifDurBefore + 1.0
 
       # Replay of the same proof: outcome=invalid, reason=duplicate
       let dupResult = sp.verifyProof(proofBytes, bindingData)
