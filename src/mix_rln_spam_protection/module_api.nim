@@ -5,14 +5,21 @@
 
 {.push raises: [].}
 
-import std/[json, times, tables]
-import chronos, results
+import std/[json, times, tables, sequtils, monotimes]
+import chronos, results, metrics
 import stew/endians2
 from stew/byteutils import hexToSeqByte
 import libp2p_mix/spam_protection
 import ./[types, constants, codec, nullifier_log]
 
 export spam_protection
+
+declarePublicCounter mix_rln_metadata_publication_failures,
+  "Metadata broadcasts that failed or were dropped", labels = ["reason"]
+declarePublicHistogram mix_rln_module_proof_seconds,
+  "Module proof call latency including transport and backend queueing",
+  labels = ["operation", "outcome"],
+  buckets = [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 80.0]
 
 type
   RlnModuleCall* = proc(
@@ -24,7 +31,6 @@ type
     rlnIdentifierHex*: string
     epochSeconds*: uint64
     maxEpochGap*: uint64
-    messageLimit*: int
     metadataTopic*: string
 
   ModuleRlnProtection* = ref object of SpamProtection
@@ -34,6 +40,7 @@ type
     metadataLog: NullifierLog
     epochLoop: Future[void]
     running: bool
+    pendingBroadcasts: seq[Future[void]]
 
 proc decodeField[N: static int](
     obj: JsonNode, key: string
@@ -82,9 +89,22 @@ proc scopedCall*(
   var args = %*[sp.config.registryId, sp.config.rlnIdentifierHex]
   for item in tail:
     args.add(item)
-  let reply = (await sp.call(methodName, args)).valueOr:
-    return err(error)
-  return parseModuleReply(reply)
+  let started = getMonoTime()
+  var outcome = "cancelled"
+  defer:
+    if methodName in ["generate_proof", "validate_proof"]:
+      mix_rln_module_proof_seconds.observe(
+        float((getMonoTime() - started).inNanoseconds) / 1e9,
+        labelValues = [methodName, outcome],
+      )
+  let reply = await sp.call(methodName, args)
+  outcome = "error"
+  if reply.isErr:
+    return err(reply.error)
+  let parsed = parseModuleReply(reply.get())
+  if parsed.isOk:
+    outcome = "success"
+  return parsed
 
 proc new*(
     T: type ModuleRlnProtection, config: ModuleRlnConfig, call: RlnModuleCall
@@ -92,8 +112,9 @@ proc new*(
   if config.registryId.len == 0 or call.isNil:
     return err("RLN module scope and transport are required")
   discard ?decodeField[32](%*{"id": config.rlnIdentifierHex}, "id")
-  if config.epochSeconds == 0 or config.messageLimit <= 0:
-    return err("Invalid RLN epoch or quota")
+  if config.epochSeconds == 0 or config.epochSeconds > uint64(high(int64)) or
+      config.maxEpochGap >= uint64(high(int64)):
+    return err("Invalid RLN epoch parameters")
   if config.metadataTopic.len == 0:
     return err("RLN coordination topic is required")
   return ok(
@@ -133,6 +154,10 @@ proc start*(
   if params.getOrDefault("epoch_size_sec").getBiggestInt(0) !=
       int64(sp.config.epochSeconds):
     return err("RLN module epoch does not match the Mix profile")
+  let gap = params.getOrDefault("max_epoch_gap")
+  if gap.isNil or gap.kind != JInt or
+      gap.getBiggestInt(-1) != int64(sp.config.maxEpochGap):
+    return err("RLN module max_epoch_gap is missing or does not match the Mix profile")
   if sp.publish.isNil:
     return err("RLN coordination publisher is required")
   sp.running = true
@@ -144,6 +169,9 @@ proc stop*(sp: ModuleRlnProtection) {.async: (raises: []).} =
   sp.running = false
   if not sp.epochLoop.isNil:
     await sp.epochLoop.cancelAndWait()
+  for broadcast in sp.pendingBroadcasts:
+    await broadcast.cancelAndWait()
+  sp.pendingBroadcasts.setLen(0)
   await sp.metadataLog.stop()
 
 method generateProofAsync*(
@@ -182,6 +210,17 @@ method isProofTokenValid*(
   token.len == 0 or
     (token.len == 32 and uint64.fromBytesLE(token.toOpenArray(0, 7)) == sp.epochNow())
 
+proc broadcastMetadata(
+    sp: ModuleRlnProtection, data: seq[byte]
+) {.async: (raises: []).} =
+  try:
+    if (await sp.publish(sp.config.metadataTopic, data)).isErr:
+      mix_rln_metadata_publication_failures.inc(labelValues = ["publish"])
+  except CancelledError:
+    mix_rln_metadata_publication_failures.inc(labelValues = ["cancelled"])
+  except CatchableError:
+    mix_rln_metadata_publication_failures.inc(labelValues = ["publish"])
+
 method verifyProofAsync*(
     sp: ModuleRlnProtection, encodedProofData, bindingData: seq[byte]
 ): Future[Result[bool, string]] {.async: (raises: [CancelledError]).} =
@@ -207,6 +246,8 @@ method verifyProofAsync*(
     )
   ).valueOr:
     return err(error)
+  if not sp.running:
+    return err("RLN module adapter stopped during verification")
   if response.getOrDefault("verdict").getStr() != "valid":
     return ok(false)
   let ext = ?decodeField[32](response, "external_nullifier")
@@ -230,13 +271,11 @@ method verifyProofAsync*(
     externalNullifier: ext,
     epoch: proof.epoch,
   )
-  try:
-    (await sp.publish(sp.config.metadataTopic, frame.toBytes())).isOkOr:
-      return err("RLN metadata publication failed: " & error)
-  except CancelledError as exc:
-    raise exc
-  except CatchableError as exc:
-    return err("RLN metadata publication failed: " & exc.msg)
+  sp.pendingBroadcasts.keepItIf(not it.finished)
+  if sp.pendingBroadcasts.len >= 64:
+    mix_rln_metadata_publication_failures.inc(labelValues = ["capacity"])
+  else:
+    sp.pendingBroadcasts.add(sp.broadcastMetadata(frame.toBytes()))
   return ok(true)
 
 proc handleProofMetadata*(
