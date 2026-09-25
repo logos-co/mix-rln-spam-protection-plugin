@@ -35,7 +35,8 @@ type
     iv: seq[byte]
     ciphertext: seq[byte] # Encrypted IdentityCredential
     membershipIndex: Option[MembershipIndex]
-    userMessageLimit: Option[uint64] # Per-user rate limit (0 means use node default)
+    userMessageLimit: Option[uint64]
+      # Rate at registration; the leaf is rebuilt from it on restart
 
   # Keystore containing multiple credentials
   Keystore* = object
