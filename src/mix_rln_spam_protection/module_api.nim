@@ -5,7 +5,7 @@
 
 {.push raises: [].}
 
-import std/[json, times, tables, sequtils, monotimes]
+import std/[json, times, tables, sequtils]
 import chronos, results, metrics
 import stew/endians2
 from stew/byteutils import hexToSeqByte
@@ -89,12 +89,12 @@ proc scopedCall*(
   var args = %*[sp.config.registryId, sp.config.rlnIdentifierHex]
   for item in tail:
     args.add(item)
-  let started = getMonoTime()
+  let started = Moment.now()
   var outcome = "cancelled"
   defer:
     if methodName in ["generate_proof", "validate_proof"]:
       mix_rln_module_proof_seconds.observe(
-        float((getMonoTime() - started).inNanoseconds) / 1e9,
+        float((Moment.now() - started).nanoseconds) / 1e9,
         labelValues = [methodName, outcome],
       )
   let reply = await sp.call(methodName, args)
