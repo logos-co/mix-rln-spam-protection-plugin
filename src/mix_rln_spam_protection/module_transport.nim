@@ -4,7 +4,10 @@
 
 {.push raises: [].}
 import std/[json, tables]
-import chronos, results
+import chronos, results, metrics
+
+declarePublicCounter mix_rln_module_request_limit_rejections,
+  "Module requests rejected because the shared pending request limit was reached"
 
 type
   RlnRequestEmitter* =
@@ -21,6 +24,7 @@ proc request*(
     r: RlnRequests, methodName: string, args: JsonNode
 ): Future[Result[JsonNode, string]] {.async: (raises: [CancelledError]).} =
   if r.pending.len >= 64:
+    mix_rln_module_request_limit_rejections.inc()
     return err("RLN request limit reached")
   if r.emit.isNil:
     return err("RLN module transport is unavailable")

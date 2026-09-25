@@ -1,5 +1,5 @@
 import std/[json, strutils, times]
-import chronos, results, unittest2
+import chronos, results, unittest2, metrics
 import stew/endians2
 import ../src/mix_rln_spam_protection/[module_api, module_transport, types, codec]
 
@@ -9,7 +9,6 @@ proc checkAdapter() {.async.} =
     rlnIdentifierHex: "cd".repeat(32),
     epochSeconds: 10,
     maxEpochGap: 3,
-    messageLimit: 100,
     metadataTopic: "/mix/1/metadata/proto",
   )
   var generated, verified, published: int
@@ -24,7 +23,7 @@ proc checkAdapter() {.async.} =
     await sleepAsync(chronos.milliseconds(1))
     case methodName
     of "get_registry_parameters":
-      return ok(%*{"epoch_size_sec": 10})
+      return ok(%*{"epoch_size_sec": 10, "max_epoch_gap": 3})
     of "generate_proof":
       inc generated
       if failure:
@@ -110,7 +109,180 @@ proc checkTransport() {.async.} =
   requests.cancel()
   check (await stopped).isErr
 
+proc checkPublication() {.async.} =
+  let config = ModuleRlnConfig(
+    registryId: "registry",
+    rlnIdentifierHex: "cd".repeat(32),
+    epochSeconds: 10,
+    maxEpochGap: 3,
+    metadataTopic: "metadata",
+  )
+  var holdValidation = false
+  let call = proc(
+      methodName: string, args: JsonNode
+  ): Future[Result[JsonNode, string]] {.async: (raises: [CancelledError]).} =
+    if methodName == "get_registry_parameters":
+      return ok(%*{"epoch_size_sec": 10, "max_epoch_gap": 3})
+    if holdValidation:
+      await sleepAsync(chronos.milliseconds(5))
+    return ok(%*{"verdict": "valid", "external_nullifier": "05".repeat(32)})
+  let sp = ModuleRlnProtection.new(config, call).tryGet()
+  var calls, cancelled: int
+  var mode = "blocked"
+  sp.setPublishCallback(
+    proc(topic: string, payload: seq[byte]): Future[Result[void, string]] {.async.} =
+      inc calls
+      case mode
+      of "error":
+        return err("publisher unavailable")
+      of "exception":
+        raise newException(IOError, "publisher exception")
+      else:
+        try:
+          await sleepAsync(chronos.hours(1))
+        except CancelledError as exc:
+          inc cancelled
+          raise exc
+        return ok()
+  )
+  check (await sp.start()).isOk
+  defer:
+    await sp.stop()
+  mix_rln_metadata_publication_failures.inc(0, labelValues = ["capacity"])
+  let capacityBefore = mix_rln_metadata_publication_failures.value(["capacity"])
+  for i in 0 ..< 65:
+    var proof: RateLimitProof
+    proof.nullifier[0] = byte(i)
+    let verified = sp.verifyProofAsync(proof.toBytes(), @[])
+    check verified.finished
+    check (await verified).tryGet()
+  check calls == 64
+  when defined(metrics):
+    check mix_rln_metadata_publication_failures.value(["capacity"]) == capacityBefore + 1
+  await sp.stop()
+  check cancelled == 64
+  check (await sp.start()).isOk
+  mix_rln_metadata_publication_failures.inc(0, labelValues = ["publish"])
+  let failuresBefore = mix_rln_metadata_publication_failures.value(["publish"])
+  for i, failureMode in ["error", "exception"]:
+    mode = failureMode
+    var proof: RateLimitProof
+    proof.nullifier[0] = byte(65 + i)
+    check (await sp.verifyProofAsync(proof.toBytes(), @[])).tryGet()
+    check not (await sp.verifyProofAsync(proof.toBytes(), @[])).tryGet()
+  check calls == 66
+  when defined(metrics):
+    check mix_rln_metadata_publication_failures.value(["publish"]) == failuresBefore + 2
+
+  holdValidation = true
+  var lateProof: RateLimitProof
+  lateProof.nullifier[0] = 99
+  let late = sp.verifyProofAsync(lateProof.toBytes(), @[])
+  await sp.stop()
+  check (await late).isErr
+  check calls == 66
+
+proc checkParameters() {.async.} =
+  let config = ModuleRlnConfig(
+    registryId: "registry",
+    rlnIdentifierHex: "cd".repeat(32),
+    epochSeconds: 10,
+    maxEpochGap: 3,
+    metadataTopic: "metadata",
+  )
+  for params in [
+    %*{"epoch_size_sec": 11, "max_epoch_gap": 3},
+    %*{"epoch_size_sec": 10},
+    %*{"epoch_size_sec": 10, "max_epoch_gap": 2},
+    %*{"epoch_size_sec": 10, "max_epoch_gap": "3"},
+    %*{"epoch_size_sec": 10, "max_epoch_gap": -1},
+  ]:
+    let reply = params
+    let call = proc(
+        methodName: string, args: JsonNode
+    ): Future[Result[JsonNode, string]] {.async: (raises: [CancelledError]).} =
+      return ok(reply)
+    let sp = ModuleRlnProtection.new(config, call).tryGet()
+    sp.setPublishCallback(
+      proc(topic: string, payload: seq[byte]): Future[Result[void, string]] {.async.} =
+        return ok()
+    )
+    check (await sp.start()).isErr
+    check (await sp.generateProofAsync(@[])).isErr
+    await sp.stop()
+
+proc checkSaturation() {.async.} =
+  let requests = RlnRequests.new(
+    proc(id: int64, methodName, args: string) {.gcsafe, raises: [].} =
+      discard
+  )
+  let before = mix_rln_module_request_limit_rejections.value()
+  var pending: seq[Future[Result[JsonNode, string]]]
+  for i in 0 ..< 64:
+    pending.add(
+      requests.request(
+        if i mod 2 == 0: "generate_proof" else: "validate_proof", newJArray()
+      )
+    )
+  check (await requests.request("validate_proof", newJArray())).isErr
+  when defined(metrics):
+    check mix_rln_module_request_limit_rejections.value() == before + 1
+  check requests.respond(1, "{}").isOk
+  check (await pending[0]).isOk
+  let next = requests.request("validate_proof", newJArray())
+  check not next.finished
+  requests.cancel()
+  for i in 1 ..< pending.len:
+    check (await pending[i]).isErr
+  check (await next).isErr
+
+proc checkLatency() {.async.} =
+  let config = ModuleRlnConfig(
+    registryId: "registry",
+    rlnIdentifierHex: "cd".repeat(32),
+    epochSeconds: 10,
+    maxEpochGap: 3,
+    metadataTopic: "metadata",
+  )
+  var mode = "success"
+  let call = proc(
+      methodName: string, args: JsonNode
+  ): Future[Result[JsonNode, string]] {.async: (raises: [CancelledError]).} =
+    await sleepAsync(chronos.milliseconds(5))
+    if mode == "error":
+      return err("backend unavailable")
+    if mode == "envelope":
+      return ok(%*{"success": false, "error": "quota"})
+    return ok(%*{"verdict": "valid"})
+  let sp = ModuleRlnProtection.new(config, call).tryGet()
+  for operation in ["generate_proof", "validate_proof"]:
+    for outcome in ["success", "error", "cancelled"]:
+      mode = outcome
+      mix_rln_module_proof_seconds.observe(0, labelValues = [operation, outcome])
+      let before = mix_rln_module_proof_seconds.valueByName(
+        "mix_rln_module_proof_seconds_count", [operation, outcome]
+      )
+      let pending = sp.scopedCall(operation)
+      if outcome == "cancelled":
+        await pending.cancelAndWait()
+      else:
+        discard await pending
+      when defined(metrics):
+        check mix_rln_module_proof_seconds.valueByName(
+          "mix_rln_module_proof_seconds_count", [operation, outcome]
+        ) == before + 1
+    mode = "envelope"
+    check (await sp.scopedCall(operation)).isErr
+
 suite "Shared RLN module adapter":
+  test "publication is bounded, best effort, and cancelled on shutdown":
+    waitFor checkPublication()
+  test "startup rejects missing and mismatched epoch parameters":
+    waitFor checkParameters()
+  test "request saturation is counted and capacity is recovered":
+    waitFor checkSaturation()
+  test "proof call latency records successes, errors, and cancellation":
+    waitFor checkLatency()
   test "asynchronous scoped proofs, quota failure and coordination":
     waitFor checkAdapter()
   test "transport rejects duplicate and late replies, and cancels pending work":
