@@ -36,7 +36,8 @@ proc request*(
     r.pending.del(id)
   r.emit(id, methodName, $args)
   let timeout =
-    if methodName in ["generate_proof", "get_membership_state", "register_membership"]:
+    # Registry-backed calls may use the backend's 70-second read budget.
+    if methodName in ["get_membership_state", "register_membership"]:
       80.seconds
     else:
       10.seconds
