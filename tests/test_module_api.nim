@@ -1,4 +1,4 @@
-import std/[json, strutils, times]
+import std/[json, strutils]
 import chronos, results, unittest2, metrics
 import stew/endians2
 import ../src/mix_rln_spam_protection/[module_api, module_transport, types, codec]
@@ -12,6 +12,7 @@ proc checkAdapter() {.async.} =
     metadataTopic: "/mix/1/metadata/proto",
   )
   var generated, verified, published: int
+  var generatedTimestamp: uint64
   var verdict = "valid"
   var failure = false
   var returnedEpoch: Epoch
@@ -28,7 +29,12 @@ proc checkAdapter() {.async.} =
       inc generated
       if failure:
         return ok(%*{"success": false, "error": "budget_exhausted"})
-      let epochBytes = toBytesLE(uint64(times.getTime().toUnix()) div 10)
+      try:
+        generatedTimestamp = uint64(parseUInt(args[3].getStr()))
+      except ValueError:
+        check false
+        return err("Invalid timestamp")
+      let epochBytes = toBytesLE(generatedTimestamp div config.epochSeconds)
       for i in 0 ..< 8:
         returnedEpoch[i] = epochBytes[i]
       return ok(
@@ -75,20 +81,42 @@ proc checkAdapter() {.async.} =
   let proof = (await pending).tryGet()
   check proof.proof.len == 301
   check sp.isProofTokenValid(proof.token)
+  let base: SpamProtection = sp
+  let selectedEpoch = 42'u64
+  let explicitProof =
+    (await base.generateProofAsync(@[1.byte, 2, 3], selectedEpoch)).tryGet()
+  check uint64.fromBytesLE(explicitProof.token.toOpenArray(0, 7)) == selectedEpoch
+  check generatedTimestamp == selectedEpoch * config.epochSeconds
+  check (await base.generateProofAsync(@[], high(uint64))).isErr
+  check generated == 2
+
   verdict = "invalid"
   check not (await sp.verifyProofAsync(proof.proof, @[1.byte, 2, 3])).tryGet()
   check published == 0
+
+  let decoded = RateLimitProof.decode(proof.proof).tryGet()
+  var frame = ProofMetadataBroadcast(
+    nullifier: decoded.nullifier,
+    shareX: decoded.shareX,
+    shareY: decoded.shareY,
+    epoch: decoded.epoch,
+  )
+  inc frame.shareX[0]
+  check sp.handleProofMetadata(frame.toBytes()).isOk
   verdict = "valid"
-  check (await sp.verifyProofAsync(proof.proof, @[1.byte, 2, 3])).tryGet()
-  check published == 1
-  # Coordination metadata suppresses a duplicate even if a backend says valid.
   check not (await sp.verifyProofAsync(proof.proof, @[1.byte, 2, 3])).tryGet()
+  check published == 0
+
+  var accepted = decoded
+  inc accepted.nullifier[0]
+  check (await sp.verifyProofAsync(accepted.toBytes(), @[1.byte, 2, 3])).tryGet()
   check published == 1
+  check not (await sp.verifyProofAsync(accepted.toBytes(), @[1.byte, 2, 3])).tryGet()
   check not (await sp.verifyProofAsync(@[0.byte], @[1.byte, 2, 3])).tryGet()
-  check verified == 3
+  check verified == 4
   failure = true
   check (await sp.generateProofAsync(@[1.byte])).isErr
-  check generated == 2
+  check generated == 3
 
 proc checkTransport() {.async.} =
   var id: int64
@@ -190,6 +218,16 @@ proc checkParameters() {.async.} =
     maxEpochGap: 3,
     metadataTopic: "metadata",
   )
+  var calls = 0
+  let countedCall = proc(
+      methodName: string, args: JsonNode
+  ): Future[Result[JsonNode, string]] {.async: (raises: [CancelledError]).} =
+    inc calls
+    return ok(%*{"epoch_size_sec": 10, "max_epoch_gap": 3})
+  let noPublisher = ModuleRlnProtection.new(config, countedCall).tryGet()
+  check (await noPublisher.start()).isErr
+  check calls == 0
+
   for params in [
     %*{"epoch_size_sec": 11, "max_epoch_gap": 3},
     %*{"epoch_size_sec": 10},

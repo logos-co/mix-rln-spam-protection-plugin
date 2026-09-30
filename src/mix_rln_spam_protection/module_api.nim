@@ -155,6 +155,8 @@ proc start*(
 ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
   if sp.running:
     return ok()
+  if sp.publish.isNil:
+    return err("RLN coordination publisher is required")
   let params = (await sp.scopedCall("get_registry_parameters")).valueOr:
     return err(error)
   if params.getOrDefault("epoch_size_sec").getBiggestInt(0) !=
@@ -164,8 +166,6 @@ proc start*(
   if gap.isNil or gap.kind != JInt or
       gap.getBiggestInt(-1) != int64(sp.config.maxEpochGap):
     return err("RLN module max_epoch_gap is missing or does not match the Mix profile")
-  if sp.publish.isNil:
-    return err("RLN coordination publisher is required")
   sp.running = true
   sp.epochLoop = sp.epochNotifications()
   return ok()
@@ -179,11 +179,13 @@ proc stop*(sp: ModuleRlnProtection) {.async: (raises: []).} =
   sp.pendingBroadcasts.setLen(0)
 
 method generateProofAsync*(
-    sp: ModuleRlnProtection, bindingData: seq[byte]
+    sp: ModuleRlnProtection, bindingData: seq[byte], epoch: uint64
 ): Future[Result[ProofResult, string]] {.async: (raises: [CancelledError]).} =
   if not sp.running:
     return err("RLN module adapter is not started")
-  let timestamp = uint64(times.getTime().toUnix())
+  if epoch > high(uint64) div sp.config.epochSeconds:
+    return err("RLN proof epoch is out of range")
+  let timestamp = epoch * sp.config.epochSeconds
   let response = (
     await sp.scopedCall("generate_proof", %*[bindingData.toHex(), $timestamp])
   ).valueOr:
@@ -196,14 +198,18 @@ method generateProofAsync*(
     shareY: ?decodeField[32](response, "share_y"),
     nullifier: ?decodeField[32](response, "nullifier"),
   )
-  if uint64.fromBytesLE(proof.epoch.toOpenArray(0, 7)) !=
-      timestamp div sp.config.epochSeconds:
+  if uint64.fromBytesLE(proof.epoch.toOpenArray(0, 7)) != epoch:
     return err("RLN backend returned a proof for a different epoch")
   let encoded = proof.toBytes()
   discard RateLimitProof.decode(encoded).valueOr:
     return err("RLN backend returned a malformed proof: " & $error)
   # Allocations are durable in the backend. Discarding cover never reuses one.
   return ok(ProofResult(proof: encoded, token: @(proof.epoch)))
+
+method generateProofAsync*(
+    sp: ModuleRlnProtection, bindingData: seq[byte]
+): Future[Result[ProofResult, string]] {.async: (raises: [CancelledError]).} =
+  return await sp.generateProofAsync(bindingData, sp.epochNow())
 
 method precomputeCoverProofs*(sp: ModuleRlnProtection): bool {.gcsafe, raises: [].} =
   false
@@ -261,6 +267,7 @@ method verifyProofAsync*(
         nullifier: proof.nullifier,
         shareX: proof.shareX,
         shareY: proof.shareY,
+        epoch: proof.epoch,
         externalNullifier: ext,
       )
     )

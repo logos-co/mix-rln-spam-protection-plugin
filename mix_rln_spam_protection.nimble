@@ -13,6 +13,7 @@ requires "chronicles >= 0.11.0"
 requires "chronos >= 4.2.2"
 requires "metrics >= 0.2.2"
 requires "nimcrypto >= 0.6.0"
+# Delivery currently resolves secp256k1 from this commit because upstream has no tag.
 requires "https://github.com/status-im/nim-secp256k1#d8f1288b7c72f00be5fc2c5ea72bf5cae1eafb15"
 requires "json_serialization >= 0.2.0"
 
@@ -28,6 +29,7 @@ task test, "Run tests":
   let librlnPath = getEnv("LIBRLN_PATH", "librln.a")
   exec "nim c -r -d:metrics -d:metricsTest --passL:" & librlnPath &
     " --passL:-lm tests/test_all.nim"
+  exec "nim c -r -d:metrics -d:metricsTest tests/test_module_api.nim"
 
 task docs, "Generate documentation":
   exec "nim doc --project --index:on --outdir:docs src/mix_rln_spam_protection.nim"
