@@ -10,28 +10,22 @@ requires "nim >= 2.2.4"
 requires "results >= 0.4.0"
 requires "stew >= 0.4.2"
 requires "chronicles >= 0.11.0"
-requires "metrics >= 0.1.0"
 requires "chronos >= 4.2.2"
+requires "metrics >= 0.2.2"
 requires "nimcrypto >= 0.6.0"
-requires "secp256k1 >= 0.5.0"
+# Delivery currently resolves secp256k1 from this commit because upstream has no tag.
+requires "https://github.com/status-im/nim-secp256k1#d8f1288b7c72f00be5fc2c5ea72bf5cae1eafb15"
 requires "json_serialization >= 0.2.0"
 
-# nim-libp2p — used only for protobuf/minprotobuf and varint, a surface that
-# has been stable for years. A range, not an exact pin: as a library this
-# should state the loosest constraint it actually needs and let the consuming
-# application pin the exact version. An exact pin here is what previously
-# froze the plugin at 2.1.4 while logos-delivery moved on, making the two
-# unsatisfiable together. Lower bound matches libp2p_mix's own requirement.
-requires "libp2p >= 2.2.0"
-
-# libp2p_mix — extracted into its own repo; previously libp2p/protocols/mix.
-# Pinned to the same SHA logos-delivery master pins, which relaxes its own
-# libp2p requirement to >= 2.2.0. Only `libp2p_mix/spam_protection` is used
-# here, and it is unchanged from the previous #c387ca67 pin.
-requires "https://github.com/logos-co/nim-libp2p-mix#39d2ac78da7b7f33562eb7cd95d6280ca9fa0e94"
+# Keep the plugin and standalone Mix facade on compatible libp2p/Mix APIs.
+requires "libp2p >= 2.3.1"
+requires "https://github.com/richard-ramos/nim-libp2p-mix#d4aeff5f032563fc0f9b042a1c8c049d9fa69fba"
 
 # Tasks
-task test, "Run tests":
+task test, "Run tests that do not require librln":
+  exec "nim c -r -d:metrics -d:metricsTest tests/test_module_api.nim"
+
+task testRLN, "Run tests that require librln":
   # Requires librln.a in current directory or set LIBRLN_PATH env var
   # -d:metrics enables live metric collectors so the metrics suite runs;
   # -d:metricsTest silences deprecation warnings on nim-metrics test helpers
