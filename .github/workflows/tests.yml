@@ -1,0 +1,46 @@
+name: Tests
+
+on:
+  pull_request:
+  merge_group:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Nim tests
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: "2.2.10"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Nim dependencies
+        run: nimble install -dy
+
+      - name: Run tests without librln
+        run: nimble test
+
+      - name: Checkout Zerokit
+        uses: actions/checkout@v6
+        with:
+          repository: vacp2p/zerokit
+          ref: v2.0.2
+          path: zerokit
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build stateless librln
+        run: >-
+          cargo build --release --manifest-path zerokit/Cargo.toml
+          -p rln --no-default-features --features stateless
+
+      - name: Run tests with librln

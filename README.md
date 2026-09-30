@@ -260,12 +260,16 @@ plugin.groupManager.loadTreeSnapshot(cast[seq[byte]](data))
 
 ## Testing
 
-Run following command to execute all tests
+Run the module-adapter tests, which do not require the native RLN library:
 
 ```bash
-# Run tests (requires librln.a)
-nim c -r --passL:/path/to/librln.a --passL:-lm tests/test_all.nim
+nimble test
+```
 
+Build `librln.a` as described above, then run the embedded RLN tests:
+
+```bash
+LIBRLN_PATH=/path/to/librln.a nimble testRLN
 ```
 
 ## References

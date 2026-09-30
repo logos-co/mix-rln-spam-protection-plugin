@@ -22,14 +22,16 @@ requires "libp2p >= 2.3.1"
 requires "https://github.com/richard-ramos/nim-libp2p-mix#d4aeff5f032563fc0f9b042a1c8c049d9fa69fba"
 
 # Tasks
-task test, "Run tests":
+task test, "Run tests that do not require librln":
+  exec "nim c -r -d:metrics -d:metricsTest tests/test_module_api.nim"
+
+task testRLN, "Run tests that require librln":
   # Requires librln.a in current directory or set LIBRLN_PATH env var
   # -d:metrics enables live metric collectors so the metrics suite runs;
   # -d:metricsTest silences deprecation warnings on nim-metrics test helpers
   let librlnPath = getEnv("LIBRLN_PATH", "librln.a")
   exec "nim c -r -d:metrics -d:metricsTest --passL:" & librlnPath &
     " --passL:-lm tests/test_all.nim"
-  exec "nim c -r -d:metrics -d:metricsTest tests/test_module_api.nim"
 
 task docs, "Generate documentation":
   exec "nim doc --project --index:on --outdir:docs src/mix_rln_spam_protection.nim"
