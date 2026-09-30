@@ -44,3 +44,6 @@ jobs:
           -p rln --no-default-features --features stateless
 
       - name: Run tests with librln
+        run: nimble testRLN
+        env:
+          LIBRLN_PATH: ${{ github.workspace }}/zerokit/target/release/librln.a
