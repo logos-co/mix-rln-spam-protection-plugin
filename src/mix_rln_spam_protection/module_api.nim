@@ -133,11 +133,7 @@ proc epochNow(sp: ModuleRlnProtection): uint64 =
   uint64(times.getTime().toUnix()) div sp.config.epochSeconds
 
 proc advanceEpoch(sp: ModuleRlnProtection, epoch: uint64) =
-  var encoded: Epoch
-  let epochBytes = toBytesLE(epoch)
-  for i in 0 ..< epochBytes.len:
-    encoded[i] = epochBytes[i]
-  sp.metadataLog.prune(encoded, int(sp.config.maxEpochGap))
+  sp.metadataLog.prune(uint64ToField(epoch), int(sp.config.maxEpochGap))
   sp.notifyEpochChange(epoch)
 
 proc epochNotifications(sp: ModuleRlnProtection) {.async: (raises: [CancelledError]).} =
@@ -198,13 +194,10 @@ method generateProofAsync*(
     shareY: ?decodeField[32](response, "share_y"),
     nullifier: ?decodeField[32](response, "nullifier"),
   )
-  if uint64.fromBytesLE(proof.epoch.toOpenArray(0, 7)) != epoch:
+  if proof.epoch != uint64ToField(epoch):
     return err("RLN backend returned a proof for a different epoch")
-  let encoded = proof.toBytes()
-  discard RateLimitProof.decode(encoded).valueOr:
-    return err("RLN backend returned a malformed proof: " & $error)
   # Allocations are durable in the backend. Discarding cover never reuses one.
-  return ok(ProofResult(proof: encoded, token: @(proof.epoch)))
+  return ok(ProofResult(proof: proof.toBytes(), token: @(proof.epoch)))
 
 method generateProofAsync*(
     sp: ModuleRlnProtection, bindingData: seq[byte]
@@ -238,7 +231,7 @@ method verifyProofAsync*(
     return err("RLN module adapter is not started")
   let proof = RateLimitProof.decode(encodedProofData).valueOr:
     return ok(false)
-  let epoch = uint64.fromBytesLE(proof.epoch.toOpenArray(0, 7))
+  let epoch = proof.epoch.epochToUint64()
   if epoch > high(uint64) div sp.config.epochSeconds:
     return ok(false)
   let wireProof = %*{
@@ -260,28 +253,19 @@ method verifyProofAsync*(
     return err("RLN module adapter stopped during verification")
   if response.getOrDefault("verdict").getStr() != "valid":
     return ok(false)
-  let ext = ?decodeField[32](response, "external_nullifier")
-  try:
-    let seen = sp.metadataLog.checkAndInsert(
-      ProofMetadata(
-        nullifier: proof.nullifier,
-        shareX: proof.shareX,
-        shareY: proof.shareY,
-        epoch: proof.epoch,
-        externalNullifier: ext,
-      )
-    )
-    if seen.isSpam or seen.isDuplicate:
-      return ok(false)
-  except KeyError:
-    return err("RLN coordination cache failure")
   let frame = ProofMetadataBroadcast(
     nullifier: proof.nullifier,
     shareX: proof.shareX,
     shareY: proof.shareY,
-    externalNullifier: ext,
+    externalNullifier: ?decodeField[32](response, "external_nullifier"),
     epoch: proof.epoch,
   )
+  try:
+    let seen = sp.metadataLog.handleNetworkMetadata(frame)
+    if seen.isSpam or seen.isDuplicate:
+      return ok(false)
+  except KeyError:
+    return err("RLN coordination cache failure")
   sp.pendingBroadcasts.keepItIf(not it.finished)
   if sp.pendingBroadcasts.len >= 64:
     mix_rln_metadata_publication_failures.inc(labelValues = ["capacity"])
@@ -294,14 +278,9 @@ proc handleProofMetadata*(
 ): Result[void, string] =
   let frame = ProofMetadataBroadcast.decode(data).valueOr:
     return err("Invalid RLN metadata: " & $error)
-  let epoch = uint64.fromBytesLE(frame.epoch.toOpenArray(0, 7))
-  let current = sp.epochNow()
-  let gap =
-    if current > epoch:
-      current - epoch
-    else:
-      epoch - current
-  if gap > sp.config.maxEpochGap:
+  if not isEpochValid(
+    frame.epoch, uint64ToField(sp.epochNow()), int(sp.config.maxEpochGap)
+  ):
     return err("RLN metadata epoch out of range")
   try:
     discard sp.metadataLog.handleNetworkMetadata(frame)

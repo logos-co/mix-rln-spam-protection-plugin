@@ -16,6 +16,7 @@ proc checkAdapter() {.async.} =
   var verdict = "valid"
   var failure = false
   var returnedEpoch: Epoch
+  var wrongEpoch = false
   let call = proc(
       methodName: string, args: JsonNode
   ): Future[Result[JsonNode, string]] {.async: (raises: [CancelledError]).} =
@@ -37,6 +38,8 @@ proc checkAdapter() {.async.} =
       let epochBytes = toBytesLE(generatedTimestamp div config.epochSeconds)
       for i in 0 ..< 8:
         returnedEpoch[i] = epochBytes[i]
+      if wrongEpoch:
+        inc returnedEpoch[0]
       return ok(
         %*{
           "success": true,
@@ -117,6 +120,14 @@ proc checkAdapter() {.async.} =
   failure = true
   check (await sp.generateProofAsync(@[1.byte])).isErr
   check generated == 3
+  failure = false
+  wrongEpoch = true
+  check (await sp.generateProofAsync(@[], selectedEpoch)).isErr
+  wrongEpoch = false
+  for i in 8 ..< returnedEpoch.len:
+    returnedEpoch[i] = 1
+    check (await sp.generateProofAsync(@[], selectedEpoch)).isErr
+    returnedEpoch[i] = 0
 
 proc checkTransport() {.async.} =
   var id: int64
