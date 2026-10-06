@@ -7,13 +7,17 @@ import std/[json, tables]
 import chronos, results, metrics
 
 declarePublicCounter mix_rln_module_request_limit_rejections,
-  "Module requests rejected because the shared pending request limit was reached"
+  "Module requests rejected because a pending request limit was reached"
+
+const MaxPendingRequestsPerKind = 32
 
 type
   RlnRequestEmitter* =
     proc(id: int64, methodName, argsJson: string) {.gcsafe, raises: [].}
   RlnRequests* = ref object
     pending: Table[int64, Future[Result[string, string]]]
+    pendingValidations: int
+    pendingLocalRequests: int
     nextId: int64
     emit*: RlnRequestEmitter
 
@@ -23,7 +27,10 @@ proc new*(T: type RlnRequests, emit: RlnRequestEmitter): T =
 proc request*(
     r: RlnRequests, methodName: string, args: JsonNode
 ): Future[Result[JsonNode, string]] {.async: (raises: [CancelledError]).} =
-  if r.pending.len >= 64:
+  let isValidation = methodName == "validate_proof"
+  let pendingCount =
+    if isValidation: r.pendingValidations else: r.pendingLocalRequests
+  if pendingCount >= MaxPendingRequestsPerKind:
     mix_rln_module_request_limit_rejections.inc()
     return err("RLN request limit reached")
   if r.emit.isNil:
@@ -32,8 +39,16 @@ proc request*(
   let id = r.nextId
   let response = newFuture[Result[string, string]]("RLN module response")
   r.pending[id] = response
+  if isValidation:
+    inc r.pendingValidations
+  else:
+    inc r.pendingLocalRequests
   defer:
     r.pending.del(id)
+    if isValidation:
+      dec r.pendingValidations
+    else:
+      dec r.pendingLocalRequests
   r.emit(id, methodName, $args)
   let timeout =
     # Registry-backed calls may use the backend's 70-second read budget.

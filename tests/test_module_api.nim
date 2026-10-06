@@ -255,24 +255,30 @@ proc checkSaturation() {.async.} =
       discard
   )
   let before = mix_rln_module_request_limit_rejections.value()
-  var pending: seq[Future[Result[JsonNode, string]]]
-  for i in 0 ..< 64:
-    pending.add(
-      requests.request(
-        if i mod 2 == 0: "generate_proof" else: "validate_proof", newJArray()
-      )
-    )
+  var validations, generations: seq[Future[Result[JsonNode, string]]]
+  for i in 0 ..< 32:
+    validations.add(requests.request("validate_proof", newJArray()))
   check (await requests.request("validate_proof", newJArray())).isErr
+  for i in 0 ..< 32:
+    generations.add(requests.request("generate_proof", newJArray()))
+  check (await requests.request("generate_proof", newJArray())).isErr
   when defined(metrics):
-    check mix_rln_module_request_limit_rejections.value() == before + 1
+    check mix_rln_module_request_limit_rejections.value() == before + 2
   check requests.respond(1, "{}").isOk
-  check (await pending[0]).isOk
+  check (await validations[0]).isOk
   let next = requests.request("validate_proof", newJArray())
   check not next.finished
+  check requests.respond(33, "{}").isOk
+  check (await generations[0]).isOk
+  let nextGeneration = requests.request("generate_proof", newJArray())
+  check not nextGeneration.finished
   requests.cancel()
-  for i in 1 ..< pending.len:
-    check (await pending[i]).isErr
+  for i in 1 ..< validations.len:
+    check (await validations[i]).isErr
+  for i in 1 ..< generations.len:
+    check (await generations[i]).isErr
   check (await next).isErr
+  check (await nextGeneration).isErr
 
 proc checkLatency() {.async.} =
   let config = ModuleRlnConfig(
