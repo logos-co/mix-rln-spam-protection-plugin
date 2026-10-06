@@ -28,8 +28,7 @@ proc request*(
     r: RlnRequests, methodName: string, args: JsonNode
 ): Future[Result[JsonNode, string]] {.async: (raises: [CancelledError]).} =
   let isValidation = methodName == "validate_proof"
-  let pendingCount =
-    if isValidation: r.pendingValidations else: r.pendingLocalRequests
+  let pendingCount = if isValidation: r.pendingValidations else: r.pendingLocalRequests
   if pendingCount >= MaxPendingRequestsPerKind:
     mix_rln_module_request_limit_rejections.inc()
     return err("RLN request limit reached")
