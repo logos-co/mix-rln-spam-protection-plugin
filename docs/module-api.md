@@ -84,10 +84,10 @@ histogram_quantile(0.95, sum by (le) (
 ))
 ```
 
-Proof generation and validation have a 10-second failure deadline. Registry-backed
-membership state and registration calls retain an 80-second deadline because the
-backend's registry reads may use a 70-second budget. Canned-response tests verify
-instrumentation, not real proof performance.
+Proof validation has a 10-second failure deadline. Proof generation and
+registry-backed membership state, parameter, and registration calls have a
+100-second deadline because the backend may use a 90-second budget. Canned-response
+tests verify instrumentation, not real proof performance.
 
 Per-packet coordination still consumes Relay quota and reveals reception timing.
 Provision Relay quota for incoming verified traffic plus normal Relay activity.
