@@ -13,8 +13,7 @@ requires "chronicles >= 0.11.0"
 requires "chronos >= 4.2.2"
 requires "metrics >= 0.2.2"
 requires "nimcrypto >= 0.6.0"
-# Delivery currently resolves secp256k1 from this commit because upstream has no tag.
-requires "https://github.com/status-im/nim-secp256k1#d8f1288b7c72f00be5fc2c5ea72bf5cae1eafb15"
+requires "secp256k1 >= 0.8.0.8.0"
 requires "json_serialization >= 0.2.0"
 
 # Keep the plugin and standalone Mix facade on compatible libp2p/Mix APIs.
