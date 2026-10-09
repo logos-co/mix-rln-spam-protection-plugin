@@ -50,12 +50,11 @@ proc request*(
       dec r.pendingLocalRequests
   r.emit(id, methodName, $args)
   let timeout =
-    # Registry-backed calls may use the backend's 70-second read budget.
-    if methodName in
-        ["get_membership_state", "get_registry_parameters", "register_membership"]:
-      80.seconds
-    else:
-      10.seconds
+    # Registry-backed calls and proof generation may use a 90-second backend budget.
+    if methodName in [
+      "generate_proof", "get_membership_state", "get_registry_parameters",
+      "register_membership",
+    ]: 100.seconds else: 10.seconds
   try:
     let raw = (await response.wait(timeout)).valueOr:
       return err(error)
