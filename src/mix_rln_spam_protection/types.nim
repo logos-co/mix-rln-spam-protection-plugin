@@ -99,12 +99,17 @@ type
     index*: MembershipIndex
 
   # Proof metadata broadcast message (for coordination layer)
-  ProofMetadataBroadcast* = object ## Message broadcast on proof metadata content topic.
+  ProofMetadataBroadcast* = object
+    ## One proof-metadata entry on the coordination topic.
     nullifier*: Nullifier
     shareX*: ShareX
     shareY*: ShareY
     externalNullifier*: ExternalNullifier
     epoch*: Epoch
+
+  ProofMetadataBatch* = object
+    ## Entries verified during one Mix epoch, published as one frame.
+    entries*: seq[ProofMetadataBroadcast]
 
   # Callback types for coordination layer integration
   PublishCallback* = proc(

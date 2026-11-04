@@ -1,7 +1,13 @@
 import std/[json, strutils]
 import chronos, results, unittest2, metrics
 import stew/endians2
-import ../src/mix_rln_spam_protection/[module_api, module_transport, types, codec]
+import
+  ../src/mix_rln_spam_protection/[module_api, module_transport, types, codec, protobuf]
+
+var testNow: int64
+
+proc testClock(): int64 {.gcsafe, raises: [].} =
+  testNow
 
 proc checkAdapter() {.async.} =
   let config = ModuleRlnConfig(
@@ -67,7 +73,9 @@ proc checkAdapter() {.async.} =
   sp.setPublishCallback(
     proc(topic: string, payload: seq[byte]): Future[Result[void, string]] {.async.} =
       check topic == config.metadataTopic
-      check ProofMetadataBroadcast.decode(payload).isOk
+      let decoded = decodeMetadata(payload).tryGet()
+      check decoded.malformed == 0
+      check decoded.entries.len == 1
       inc published
       return ok()
   )
@@ -110,7 +118,7 @@ proc checkAdapter() {.async.} =
   var accepted = decoded
   inc accepted.nullifier[0]
   check (await sp.verifyProofAsync(accepted.toBytes(), @[1.byte, 2, 3])).tryGet()
-  check published == 1
+  check published == 0
   check not (await sp.verifyProofAsync(accepted.toBytes(), @[1.byte, 2, 3])).tryGet()
   check not (await sp.verifyProofAsync(@[0.byte], @[1.byte, 2, 3])).tryGet()
   check verified == 4
@@ -137,78 +145,258 @@ proc checkTransport() {.async.} =
   requests.cancel()
   check (await stopped).isErr
 
-proc checkPublication() {.async.} =
-  let config = ModuleRlnConfig(
+proc epochField(n: uint64): Epoch =
+  let raw = toBytesLE(n)
+  for i in 0 ..< raw.len:
+    result[i] = raw[i]
+
+proc moduleConfig(): ModuleRlnConfig =
+  ModuleRlnConfig(
     registryId: "registry",
     rlnIdentifierHex: "cd".repeat(32),
     epochSeconds: 10,
     maxEpochGap: 3,
     metadataTopic: "metadata",
   )
-  var holdValidation = false
-  let call = proc(
+
+type Hold = ref object
+  on: bool
+
+proc registryCall(
+    hold: Hold
+): proc(methodName: string, args: JsonNode): Future[Result[JsonNode, string]] {.
+  async: (raises: [CancelledError])
+.} =
+  result = proc(
       methodName: string, args: JsonNode
   ): Future[Result[JsonNode, string]] {.async: (raises: [CancelledError]).} =
     if methodName == "get_registry_parameters":
       return ok(%*{"epoch_size_sec": 10, "max_epoch_gap": 3})
-    if holdValidation:
+    if hold.on:
       await sleepAsync(chronos.milliseconds(5))
     return ok(%*{"verdict": "valid", "external_nullifier": "05".repeat(32)})
-  let sp = ModuleRlnProtection.new(config, call).tryGet()
-  var calls, cancelled: int
-  var mode = "blocked"
+
+template waitUntil(cond: untyped) =
+  for _ in 0 ..< 30:
+    if cond:
+      break
+    await sleepAsync(chronos.milliseconds(50))
+  check cond
+
+proc checkEpochBatch() {.async.} =
+  testNow = 1_700_000_000
+  let epoch = uint64(testNow) div 10
+  let sp =
+    ModuleRlnProtection.new(moduleConfig(), registryCall(Hold(on: false))).tryGet()
+  sp.setNowUnix(testClock)
+  var payloads: seq[seq[byte]]
   sp.setPublishCallback(
     proc(topic: string, payload: seq[byte]): Future[Result[void, string]] {.async.} =
-      inc calls
-      case mode
-      of "error":
-        return err("publisher unavailable")
-      of "exception":
-        raise newException(IOError, "publisher exception")
-      else:
-        try:
-          await sleepAsync(chronos.hours(1))
-        except CancelledError as exc:
-          inc cancelled
-          raise exc
-        return ok()
+      payloads.add(payload)
+      return ok()
   )
   check (await sp.start()).isOk
   defer:
     await sp.stop()
-  mix_rln_metadata_publication_failures.inc(0, labelValues = ["capacity"])
-  let capacityBefore = mix_rln_metadata_publication_failures.value(["capacity"])
-  for i in 0 ..< 65:
+  for i in 0 ..< 3:
     var proof: RateLimitProof
-    proof.nullifier[0] = byte(i)
-    let verified = sp.verifyProofAsync(proof.toBytes(), @[])
-    check verified.finished
-    check (await verified).tryGet()
-  check calls == 64
+    proof.nullifier[0] = byte(i + 1)
+    proof.epoch = epochField(epoch)
+    check (await sp.verifyProofAsync(proof.toBytes(), @[])).tryGet()
+  check payloads.len == 0
+
+  mix_rln_metadata_batch_entries.observe(0)
+  let batchesBefore = mix_rln_metadata_batch_entries.valueByName(
+    "mix_rln_metadata_batch_entries_count", []
+  )
+  let entriesBefore =
+    mix_rln_metadata_batch_entries.valueByName("mix_rln_metadata_batch_entries_sum", [])
+  testNow += 10
+  waitUntil(payloads.len == 1)
+  check payloads.len == 1
+  let decoded = decodeMetadata(payloads[0]).tryGet()
+  check decoded.malformed == 0
+  check decoded.entries.len == 3
+  check decoded.entries[0].nullifier[0] == 1
+  check decoded.entries[2].nullifier[0] == 3
   when defined(metrics):
-    check mix_rln_metadata_publication_failures.value(["capacity"]) == capacityBefore + 1
-  await sp.stop()
-  check cancelled == 64
+    check mix_rln_metadata_batch_entries.valueByName(
+      "mix_rln_metadata_batch_entries_count", []
+    ) == batchesBefore + 1
+    check mix_rln_metadata_batch_entries.valueByName(
+      "mix_rln_metadata_batch_entries_sum", []
+    ) == entriesBefore + 3
+
+  # The next epoch has nothing to send.
+  testNow += 10
+  await sleepAsync(chronos.milliseconds(250))
+  check payloads.len == 1
+
+proc checkPublishFailure() {.async.} =
+  testNow = 1_700_000_000
+  let epoch = uint64(testNow) div 10
+  let hold = Hold(on: false)
+  let sp = ModuleRlnProtection.new(moduleConfig(), registryCall(hold)).tryGet()
+  sp.setNowUnix(testClock)
+  var calls = 0
+  var mode = "error"
+  sp.setPublishCallback(
+    proc(topic: string, payload: seq[byte]): Future[Result[void, string]] {.async.} =
+      inc calls
+      await sleepAsync(chronos.milliseconds(1))
+      if mode == "error":
+        return err("publisher unavailable")
+      raise newException(IOError, "publisher exception")
+  )
   check (await sp.start()).isOk
+  defer:
+    await sp.stop()
   mix_rln_metadata_publication_failures.inc(0, labelValues = ["publish"])
   let failuresBefore = mix_rln_metadata_publication_failures.value(["publish"])
   for i, failureMode in ["error", "exception"]:
     mode = failureMode
     var proof: RateLimitProof
-    proof.nullifier[0] = byte(65 + i)
+    proof.nullifier[0] = byte(i + 1)
+    proof.epoch = epochField(epoch + uint64(i))
     check (await sp.verifyProofAsync(proof.toBytes(), @[])).tryGet()
-    check not (await sp.verifyProofAsync(proof.toBytes(), @[])).tryGet()
-  check calls == 66
+    testNow += 10
+    waitUntil(calls == i + 1)
+    await sleepAsync(chronos.milliseconds(50))
   when defined(metrics):
     check mix_rln_metadata_publication_failures.value(["publish"]) == failuresBefore + 2
 
-  holdValidation = true
+proc checkStopFlushes() {.async.} =
+  testNow = 1_700_000_000
+  let epoch = uint64(testNow) div 10
+  let hold = Hold(on: false)
+  let sp = ModuleRlnProtection.new(moduleConfig(), registryCall(hold)).tryGet()
+  sp.setNowUnix(testClock)
+  var payloads: seq[seq[byte]]
+  sp.setPublishCallback(
+    proc(topic: string, payload: seq[byte]): Future[Result[void, string]] {.async.} =
+      payloads.add(payload)
+      return ok()
+  )
+  check (await sp.start()).isOk
+  for i in 0 ..< 2:
+    var proof: RateLimitProof
+    proof.nullifier[0] = byte(i + 1)
+    proof.epoch = epochField(epoch)
+    check (await sp.verifyProofAsync(proof.toBytes(), @[])).tryGet()
+  check payloads.len == 0
+  await sp.stop()
+  check payloads.len == 1
+  check decodeMetadata(payloads[0]).tryGet().entries.len == 2
+
+  check (await sp.start()).isOk
+  defer:
+    await sp.stop()
+  hold.on = true
   var lateProof: RateLimitProof
   lateProof.nullifier[0] = 99
+  lateProof.epoch = epochField(epoch)
   let late = sp.verifyProofAsync(lateProof.toBytes(), @[])
   await sp.stop()
   check (await late).isErr
-  check calls == 66
+  check payloads.len == 1
+
+proc checkBatchSpam() {.async.} =
+  testNow = 1_700_000_000
+  let epoch = uint64(testNow) div 10
+  let call = registryCall(Hold(on: false))
+  let config = moduleConfig()
+  let a = ModuleRlnProtection.new(config, call).tryGet()
+  let b = ModuleRlnProtection.new(config, call).tryGet()
+  a.setNowUnix(testClock)
+  b.setNowUnix(testClock)
+  var aPayloads, bPayloads: seq[seq[byte]]
+  a.setPublishCallback(
+    proc(topic: string, payload: seq[byte]): Future[Result[void, string]] {.async.} =
+      aPayloads.add(payload)
+      return ok()
+  )
+  b.setPublishCallback(
+    proc(topic: string, payload: seq[byte]): Future[Result[void, string]] {.async.} =
+      bPayloads.add(payload)
+      return ok()
+  )
+  check (await a.start()).isOk
+  check (await b.start()).isOk
+  defer:
+    await a.stop()
+    await b.stop()
+
+  var proofA, proofB: RateLimitProof
+  proofA.epoch = epochField(epoch)
+  proofB.epoch = proofA.epoch
+  proofA.nullifier[0] = 7
+  proofB.nullifier[0] = 7
+  proofA.shareX[0] = 1
+  proofB.shareX[0] = 2
+  check (await a.verifyProofAsync(proofA.toBytes(), @[])).tryGet()
+  check (await b.verifyProofAsync(proofB.toBytes(), @[])).tryGet()
+  check aPayloads.len == 0
+  check bPayloads.len == 0
+
+  testNow += 10
+  waitUntil(aPayloads.len == 1)
+  waitUntil(bPayloads.len == 1)
+  check aPayloads.len == 1
+  check bPayloads.len == 1
+  check decodeMetadata(aPayloads[0]).tryGet().entries[0].shareX[0] == 1
+  check decodeMetadata(bPayloads[0]).tryGet().entries[0].shareX[0] == 2
+
+  let conflictsBefore = mix_rln_metadata_conflicts_total.value()
+  check b.handleProofMetadata(aPayloads[0]).isOk
+  check a.handleProofMetadata(bPayloads[0]).isOk
+  when defined(metrics):
+    check mix_rln_metadata_conflicts_total.value() == conflictsBefore + 2
+
+proc checkBatchSkips() {.async.} =
+  testNow = 1_700_000_000
+  let epoch = uint64(testNow) div 10
+  let sp =
+    ModuleRlnProtection.new(moduleConfig(), registryCall(Hold(on: false))).tryGet()
+  sp.setNowUnix(testClock)
+  sp.setPublishCallback(
+    proc(topic: string, payload: seq[byte]): Future[Result[void, string]] {.async.} =
+      return ok()
+  )
+  check (await sp.start()).isOk
+  defer:
+    await sp.stop()
+
+  var fresh, stale: ProofMetadataBroadcast
+  fresh.nullifier[0] = 11
+  fresh.epoch = epochField(epoch)
+  fresh.shareX[0] = 1
+  stale.nullifier[0] = 12
+  stale.epoch = epochField(epoch + 100)
+  stale.shareX[0] = 1
+  var buf = initProtoBuffer()
+  buf.write3(1, fresh.toBytes())
+  buf.write3(1, @[byte 1, 2, 3])
+  buf.write3(1, stale.toBytes())
+  buf.finish3()
+
+  mix_rln_metadata_entries_skipped.inc(0, labelValues = ["malformed"])
+  mix_rln_metadata_entries_skipped.inc(0, labelValues = ["epoch_gap"])
+  let malformedBefore = mix_rln_metadata_entries_skipped.value(["malformed"])
+  let gapBefore = mix_rln_metadata_entries_skipped.value(["epoch_gap"])
+  check sp.handleProofMetadata(buf.buffer).isOk
+  when defined(metrics):
+    check mix_rln_metadata_entries_skipped.value(["malformed"]) == malformedBefore + 1
+    check mix_rln_metadata_entries_skipped.value(["epoch_gap"]) == gapBefore + 1
+
+  var conflict, unseen: RateLimitProof
+  conflict.nullifier[0] = 11
+  conflict.epoch = fresh.epoch
+  conflict.shareX[0] = 9
+  unseen.nullifier[0] = 12
+  unseen.epoch = stale.epoch
+  unseen.shareX[0] = 9
+  check not (await sp.verifyProofAsync(conflict.toBytes(), @[])).tryGet()
+  check (await sp.verifyProofAsync(unseen.toBytes(), @[])).tryGet()
 
 proc checkParameters() {.async.} =
   let config = ModuleRlnConfig(
@@ -319,8 +507,42 @@ proc checkLatency() {.async.} =
     check (await sp.scopedCall(operation)).isErr
 
 suite "Shared RLN module adapter":
-  test "publication is bounded, best effort, and cancelled on shutdown":
-    waitFor checkPublication()
+  test "metadata batch roundtrip keeps a legacy single entry":
+    var entry: ProofMetadataBroadcast
+    entry.nullifier[0] = 1
+    entry.shareX[0] = 2
+    entry.shareY[0] = 3
+    entry.externalNullifier[0] = 4
+    entry.epoch[0] = 5
+    var second = entry
+    second.nullifier[0] = 8
+    let batch = ProofMetadataBatch(entries: @[entry, second])
+    check ProofMetadataBroadcast.decode(batch.toBytes()).isErr
+    let decoded = decodeMetadata(batch.toBytes()).tryGet()
+    check decoded.malformed == 0
+    check decoded.entries.len == 2
+    check decoded.entries[0].nullifier == entry.nullifier
+    check decoded.entries[1].shareX == second.shareX
+    let legacy = decodeMetadata(entry.toBytes()).tryGet()
+    check legacy.entries.len == 1
+    check legacy.malformed == 0
+    check decodeMetadata(@[1.byte, 2, 3]).isErr
+    var broken = initProtoBuffer()
+    broken.write3(1, @[1.byte])
+    broken.write3(2, @[2.byte])
+    broken.finish3()
+    check decodeMetadata(broken.buffer).isErr
+
+  test "one epoch of proofs publishes one batch after the epoch ends":
+    waitFor checkEpochBatch()
+  test "a failed batch publish is counted and dropped":
+    waitFor checkPublishFailure()
+  test "stop flushes the open batch and does not publish a late verify":
+    waitFor checkStopFlushes()
+  test "both nodes flag a nullifier carried in the other node's batch":
+    waitFor checkBatchSpam()
+  test "a bad batch entry is skipped and the rest is applied":
+    waitFor checkBatchSkips()
   test "startup rejects missing and mismatched epoch parameters":
     waitFor checkParameters()
   test "request saturation is counted and capacity is recovered":

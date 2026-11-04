@@ -26,14 +26,18 @@ to reconstruct it from the scope and epoch. The backend must support this
 form and return the derived field with its verdict. A wrong scope, signal,
 malformed proof, failed request, or missing field fails closed.
 
-A successful validation schedules a best-effort `ProofMetadataBroadcast` through
-the supplied publish callback and returns without waiting for publication.
-At most 64 broadcasts may be pending; excess broadcasts are dropped and counted.
-Shutdown cancels and waits for pending broadcasts. Publication errors do not
-reject an otherwise valid packet; local duplicate detection remains active. Incoming coordination frames enter through
-`handleProofMetadata`. The deployment must protect this coordination channel;
-Logos Mixnet requires RLN-protected Relay. Registry membership synchronization
-belongs to the backend, so this mode does not gossip membership announcements.
+A successful validation appends one entry to the current Mix epoch's batch and
+returns without publishing. The epoch loop publishes that batch through the
+supplied publish callback when the epoch changes, then clears it. An empty
+epoch publishes nothing. Shutdown publishes whatever is still buffered and
+waits for that publish. Publication errors do not reject an otherwise valid
+packet; local duplicate detection remains active. `handleProofMetadata` accepts
+a legacy single `ProofMetadataBroadcast` or a batch of those entries. It checks
+`maxEpochGap` per entry. A malformed entry is counted and skipped, and the rest
+of the batch is still applied. The deployment must protect this coordination
+channel; Logos Mixnet requires RLN-protected Relay. Registry membership
+synchronization belongs to the backend, so this mode does not gossip membership
+announcements.
 
 Cover precomputation prepares Sphinx packets without spending backend quota.
 A proof is generated when a cover packet is sent. A spent backend allocation
@@ -57,8 +61,14 @@ Logos Mix module's `WORK_SUMMARY.md`.
 
 Build the host with `-d:metrics` and expose its metrics registry:
 
-- `mix_rln_metadata_publication_failures`: failed/dropped broadcasts, labelled
-  `reason=publish|capacity|cancelled`.
+- `mix_rln_metadata_publication_failures`: failed batch publishes, labelled
+  `reason=publish|cancelled`.
+- `mix_rln_metadata_batch_entries`: histogram of how many entries a published
+  batch carried.
+- `mix_rln_metadata_entries_skipped`: entries not applied, labelled
+  `reason=malformed|epoch_gap`.
+- `mix_rln_metadata_conflicts_total`: received entries whose nullifier was
+  already in the local log with different shares.
 - `mix_rln_module_request_limit_rejections`: requests rejected by the standalone
   transport's shared 64-request cap. Delivery's separate transport is not covered.
 - `mix_rln_module_proof_seconds`: histogram labelled
@@ -89,7 +99,7 @@ registry-backed membership state, parameter, and registration calls have a
 100-second deadline because the backend may use a 90-second budget. Canned-response
 tests verify instrumentation, not real proof performance.
 
-Per-packet coordination still consumes Relay quota and reveals reception timing.
-Provision Relay quota for incoming verified traffic plus normal Relay activity.
-Batching is a follow-up: it reduces publication volume and timing correlation,
-but delays network-wide reuse detection and can still reveal batch size/timing.
+Each Mix epoch that verified at least one proof publishes one Relay message.
+Other nodes learn a nullifier up to one epoch later. The local log still
+catches a double-signal this node sees itself, at once. A batch of 100 entries
+is about 17 KB.
