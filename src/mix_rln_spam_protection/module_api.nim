@@ -39,6 +39,9 @@ type
     epochSeconds*: uint64
     maxEpochGap*: uint64
     metadataTopic*: string
+    disableMetadataBatch*: bool
+      ## False, the zero value, publishes one batch per epoch. True publishes
+      ## each verified proof immediately as a single ProofMetadataBroadcast.
 
   ModuleRlnProtection* = ref object of SpamProtection
     config*: ModuleRlnConfig
@@ -159,17 +162,23 @@ proc advanceEpoch(sp: ModuleRlnProtection, epoch: uint64) =
 
 proc broadcastMetadata(sp: ModuleRlnProtection, data: seq[byte]) {.async: (raises: []).}
 
+proc enqueuePublish(sp: ModuleRlnProtection, payload: seq[byte]) =
+  ## Track the future without awaiting it, so cancelling the epoch loop does
+  ## not cancel the publish.
+  if sp.publish.isNil:
+    return
+  sp.batchPublishes.keepItIf(not it.finished)
+  sp.batchPublishes.add(sp.broadcastMetadata(payload))
+
 proc publishBatch(sp: ModuleRlnProtection) =
-  ## Hand the open batch to the publish callback. The future is tracked, not
-  ## awaited, so cancelling the epoch loop does not cancel the publish.
+  ## Hand the open batch to the publish callback.
   if sp.metadataBatch.len == 0 or sp.publish.isNil:
     return
   let count = sp.metadataBatch.len
   let payload = ProofMetadataBatch(entries: sp.metadataBatch).toBytes()
   sp.metadataBatch.setLen(0)
   mix_rln_metadata_batch_entries.observe(float(count))
-  sp.batchPublishes.keepItIf(not it.finished)
-  sp.batchPublishes.add(sp.broadcastMetadata(payload))
+  sp.enqueuePublish(payload)
 
 proc epochNotifications(sp: ModuleRlnProtection) {.async: (raises: [CancelledError]).} =
   var epoch = sp.epochNow()
@@ -312,15 +321,17 @@ method verifyProofAsync*(
       return ok(false)
   except KeyError:
     return err("RLN coordination cache failure")
-  sp.metadataBatch.add(
-    ProofMetadataBroadcast(
-      nullifier: proof.nullifier,
-      shareX: proof.shareX,
-      shareY: proof.shareY,
-      externalNullifier: ext,
-      epoch: proof.epoch,
-    )
+  let entry = ProofMetadataBroadcast(
+    nullifier: proof.nullifier,
+    shareX: proof.shareX,
+    shareY: proof.shareY,
+    externalNullifier: ext,
+    epoch: proof.epoch,
   )
+  if sp.config.disableMetadataBatch:
+    sp.enqueuePublish(entry.toBytes())
+  else:
+    sp.metadataBatch.add(entry)
   return ok(true)
 
 proc applyMetadataEntry(

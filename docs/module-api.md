@@ -29,8 +29,10 @@ malformed proof, failed request, or missing field fails closed.
 A successful validation appends one entry to the current Mix epoch's batch and
 returns without publishing. The epoch loop publishes that batch through the
 supplied publish callback when the epoch changes, then clears it. An empty
-epoch publishes nothing. Shutdown publishes whatever is still buffered and
-waits for that publish. Publication errors do not reject an otherwise valid
+epoch publishes nothing. `disableMetadataBatch` defaults to false, so a host
+that leaves the field unset keeps batching. Setting it publishes each verified
+proof immediately as one `ProofMetadataBroadcast`. Shutdown publishes whatever
+is still buffered and waits for that publish. Publication errors do not reject an otherwise valid
 packet; local duplicate detection remains active. `handleProofMetadata` accepts
 a legacy single `ProofMetadataBroadcast` or a batch of those entries. It checks
 `maxEpochGap` per entry. A malformed entry is counted and skipped, and the rest

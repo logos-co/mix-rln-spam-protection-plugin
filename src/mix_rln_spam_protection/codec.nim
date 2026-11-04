@@ -34,8 +34,8 @@
 ##     repeated ProofMetadataEntry entries = 1;
 ##   }
 ##
-## ProofMetadataEntry is the flat ProofMetadataBroadcast encoding. Publishers
-## send only the batch. Decoders still accept one bare entry.
+## ProofMetadataEntry is the flat ProofMetadataBroadcast encoding. A publisher
+## sends either one batch or one bare entry. Decoders accept either.
 
 {.push raises: [].}
 

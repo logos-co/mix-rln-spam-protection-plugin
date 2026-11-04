@@ -183,6 +183,36 @@ template waitUntil(cond: untyped) =
     await sleepAsync(chronos.milliseconds(50))
   check cond
 
+proc checkImmediatePublish() {.async.} =
+  check not moduleConfig().disableMetadataBatch
+  testNow = 1_700_000_000
+  let epoch = uint64(testNow) div 10
+  var config = moduleConfig()
+  config.disableMetadataBatch = true
+  let sp = ModuleRlnProtection.new(config, registryCall(Hold(on: false))).tryGet()
+  sp.setNowUnix(testClock)
+  var payloads: seq[seq[byte]]
+  sp.setPublishCallback(
+    proc(topic: string, payload: seq[byte]): Future[Result[void, string]] {.async.} =
+      payloads.add(payload)
+      return ok()
+  )
+  check (await sp.start()).isOk
+  defer:
+    await sp.stop()
+  for i in 0 ..< 2:
+    var proof: RateLimitProof
+    proof.nullifier[0] = byte(i + 1)
+    proof.epoch = epochField(epoch)
+    check (await sp.verifyProofAsync(proof.toBytes(), @[])).tryGet()
+    waitUntil(payloads.len == i + 1)
+    check ProofMetadataBroadcast.decode(payloads[i]).isOk
+    check decodeMetadata(payloads[i]).tryGet().entries.len == 1
+    check decodeMetadata(payloads[i]).tryGet().entries[0].nullifier[0] == byte(i + 1)
+  testNow += 10
+  await sleepAsync(chronos.milliseconds(250))
+  check payloads.len == 2
+
 proc checkEpochBatch() {.async.} =
   testNow = 1_700_000_000
   let epoch = uint64(testNow) div 10
@@ -535,6 +565,8 @@ suite "Shared RLN module adapter":
 
   test "one epoch of proofs publishes one batch after the epoch ends":
     waitFor checkEpochBatch()
+  test "disableMetadataBatch publishes each proof immediately":
+    waitFor checkImmediatePublish()
   test "a failed batch publish is counted and dropped":
     waitFor checkPublishFailure()
   test "stop flushes the open batch and does not publish a late verify":
