@@ -286,10 +286,42 @@ proc checkBatchChunks() {.async.} =
     proof.nullifier[1] = byte(i shr 8)
     proof.epoch = epochField(epoch)
     check (await sp.verifyProofAsync(proof.toBytes(), @[])).tryGet()
-  check payloads.len == 0
+  check payloads.len == 1
+  check decodeMetadata(payloads[0]).tryGet().entries.len == MaxMetadataBatchEntries
   testNow += 10
   waitUntil(payloads.len == 2)
-  check decodeMetadata(payloads[0]).tryGet().entries.len == MaxMetadataBatchEntries
+  check decodeMetadata(payloads[1]).tryGet().entries.len == 1
+
+proc checkTunedBatchSize() {.async.} =
+  testNow = 1_700_000_000
+  let epoch = uint64(testNow) div 10
+  var config = moduleConfig()
+  check config.maxMetadataBatchEntries == 0
+  config.maxMetadataBatchEntries = 2
+  let sp = ModuleRlnProtection.new(config, registryCall(Hold(on: false))).tryGet()
+  check sp.config.maxMetadataBatchEntries == 2
+  let defaults =
+    ModuleRlnProtection.new(moduleConfig(), registryCall(Hold(on: false))).tryGet()
+  check defaults.config.maxMetadataBatchEntries == uint64(MaxMetadataBatchEntries)
+  sp.setNowUnix(testClock)
+  var payloads: seq[seq[byte]]
+  sp.setPublishCallback(
+    proc(topic: string, payload: seq[byte]): Future[Result[void, string]] {.async.} =
+      payloads.add(payload)
+      return ok()
+  )
+  check (await sp.start()).isOk
+  defer:
+    await sp.stop()
+  for i in 0 ..< 3:
+    var proof: RateLimitProof
+    proof.nullifier[0] = byte(i + 1)
+    proof.epoch = epochField(epoch)
+    check (await sp.verifyProofAsync(proof.toBytes(), @[])).tryGet()
+  check payloads.len == 1
+  check decodeMetadata(payloads[0]).tryGet().entries.len == 2
+  testNow += 10
+  waitUntil(payloads.len == 2)
   check decodeMetadata(payloads[1]).tryGet().entries.len == 1
 
 proc checkPublishFailure() {.async.} =
@@ -631,6 +663,8 @@ suite "Shared RLN module adapter":
     waitFor checkEpochBatch()
   test "a batch over 500 entries is published as successive messages":
     waitFor checkBatchChunks()
+  test "a tuned batch publishes when full, and the remainder waits for the epoch":
+    waitFor checkTunedBatchSize()
   test "conflicts counter exports a single _total suffix":
     when defined(metrics):
       let rendered = $mix_rln_metadata_conflicts

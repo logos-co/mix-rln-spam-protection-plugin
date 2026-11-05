@@ -42,6 +42,10 @@ type
     disableMetadataBatch*: bool
       ## False, the zero value, publishes one batch per epoch. True publishes
       ## each verified proof immediately as a one-entry MessagingMetadata.
+    maxMetadataBatchEntries*: uint64
+      ## Entries in one coordination message. The open batch also publishes
+      ## when the Mix epoch changes, whichever comes first. Zero uses
+      ## MaxMetadataBatchEntries.
     publishStopTimeoutMs*: uint64
       ## How long stop waits for in-flight metadata publishes. Zero uses
       ## DefaultPublishStopTimeoutMs.
@@ -143,6 +147,8 @@ proc new*(
   if config.metadataTopic.len == 0:
     return err("RLN coordination topic is required")
   var stored = config
+  if stored.maxMetadataBatchEntries == 0:
+    stored.maxMetadataBatchEntries = uint64(MaxMetadataBatchEntries)
   if stored.publishStopTimeoutMs == 0:
     stored.publishStopTimeoutMs = DefaultPublishStopTimeoutMs
   return ok(
@@ -192,13 +198,23 @@ proc enqueuePublish(sp: ModuleRlnProtection, payload: seq[byte]) =
       discard sp.inFlight.pop(id, done)
   )
 
+proc metadataBatchLimit(sp: ModuleRlnProtection): int =
+  ## A zero or oversized config falls back to the default. The fallback keeps
+  ## the publish loop from slicing zero entries.
+  let configured = sp.config.maxMetadataBatchEntries
+  if configured == 0 or configured > uint64(high(int)):
+    MaxMetadataBatchEntries
+  else:
+    int(configured)
+
 proc publishBatch(sp: ModuleRlnProtection) =
   ## Hand the open batch to the publish callback, in chunks that fit one frame.
   if sp.metadataBatch.len == 0 or sp.publish.isNil:
     return
+  let limit = sp.metadataBatchLimit()
   var offset = 0
   while offset < sp.metadataBatch.len:
-    let count = min(MaxMetadataBatchEntries, sp.metadataBatch.len - offset)
+    let count = min(limit, sp.metadataBatch.len - offset)
     let payload =
       MessagingMetadata(entries: sp.metadataBatch[offset ..< offset + count]).toBytes()
     mix_rln_metadata_batch_entries.observe(float(count))
@@ -388,6 +404,8 @@ method verifyProofAsync*(
     sp.enqueuePublish(payload)
   else:
     sp.metadataBatch.add(entry)
+    if sp.metadataBatch.len >= sp.metadataBatchLimit():
+      sp.publishBatch()
   return ok(true)
 
 proc applyMetadataEntry(

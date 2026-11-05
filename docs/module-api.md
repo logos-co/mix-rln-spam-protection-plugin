@@ -26,10 +26,11 @@ to reconstruct it from the scope and epoch. The backend must support this
 form and return the derived field with its verdict. A wrong scope, signal,
 malformed proof, failed request, or missing field fails closed.
 
-A successful validation appends one entry to the current Mix epoch's batch and
-returns without publishing. The epoch loop publishes that batch through the
-supplied publish callback when the epoch changes, then clears it. More than
-500 entries go out as successive messages of 500. An empty epoch publishes
+A successful validation appends one entry to the current batch and returns.
+The batch publishes when it reaches `maxMetadataBatchEntries` or the Mix
+epoch changes, whichever comes first, then clears. Zero means 500. One entry
+is about 173 bytes, and 500 stays under Waku's 150 KiB default. A host whose
+relay limit differs sets the entry count to match. An empty epoch publishes
 nothing. `disableMetadataBatch` defaults to false, so a host
 that leaves the field unset keeps batching. Setting it publishes each verified
 proof immediately as a one-entry `MessagingMetadata`. Shutdown publishes
