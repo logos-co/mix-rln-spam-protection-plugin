@@ -28,8 +28,9 @@ malformed proof, failed request, or missing field fails closed.
 
 A successful validation appends one entry to the current Mix epoch's batch and
 returns without publishing. The epoch loop publishes that batch through the
-supplied publish callback when the epoch changes, then clears it. An empty
-epoch publishes nothing. `disableMetadataBatch` defaults to false, so a host
+supplied publish callback when the epoch changes, then clears it. More than
+500 entries go out as successive messages of 500. An empty epoch publishes
+nothing. `disableMetadataBatch` defaults to false, so a host
 that leaves the field unset keeps batching. Setting it publishes each verified
 proof immediately as a one-entry `MessagingMetadata`. Shutdown publishes
 whatever is still buffered and waits for that publish. Publication errors do

@@ -21,7 +21,7 @@ declarePublicHistogram mix_rln_metadata_batch_entries,
   buckets = [1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0]
 declarePublicCounter mix_rln_metadata_entries_skipped,
   "Coordination entries not applied", labels = ["reason"]
-declarePublicCounter mix_rln_metadata_conflicts_total,
+declarePublicCounter mix_rln_metadata_conflicts,
   "Received entries whose nullifier was already logged with different shares"
 declarePublicHistogram mix_rln_module_proof_seconds,
   "Module proof call latency including transport and backend queueing",
@@ -170,15 +170,22 @@ proc enqueuePublish(sp: ModuleRlnProtection, payload: seq[byte]) =
   sp.batchPublishes.keepItIf(not it.finished)
   sp.batchPublishes.add(sp.broadcastMetadata(payload))
 
+const MaxMetadataBatchEntries* = 500
+  ## One entry is about 173 bytes. 500 stays under Waku's 150 KiB message limit.
+
 proc publishBatch(sp: ModuleRlnProtection) =
-  ## Hand the open batch to the publish callback.
+  ## Hand the open batch to the publish callback, in chunks that fit one frame.
   if sp.metadataBatch.len == 0 or sp.publish.isNil:
     return
-  let count = sp.metadataBatch.len
-  let payload = MessagingMetadata(entries: sp.metadataBatch).toBytes()
+  var offset = 0
+  while offset < sp.metadataBatch.len:
+    let count = min(MaxMetadataBatchEntries, sp.metadataBatch.len - offset)
+    let payload =
+      MessagingMetadata(entries: sp.metadataBatch[offset ..< offset + count]).toBytes()
+    mix_rln_metadata_batch_entries.observe(float(count))
+    sp.enqueuePublish(payload)
+    offset += count
   sp.metadataBatch.setLen(0)
-  mix_rln_metadata_batch_entries.observe(float(count))
-  sp.enqueuePublish(payload)
 
 proc epochNotifications(sp: ModuleRlnProtection) {.async: (raises: [CancelledError]).} =
   var epoch = sp.epochNow()
@@ -352,7 +359,7 @@ proc applyMetadataEntry(
   try:
     let seen = sp.metadataLog.handleNetworkMetadata(entry)
     if seen.isSpam:
-      mix_rln_metadata_conflicts_total.inc()
+      mix_rln_metadata_conflicts.inc()
     return ok()
   except KeyError:
     return err("RLN coordination cache failure")

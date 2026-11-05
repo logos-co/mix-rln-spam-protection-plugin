@@ -264,6 +264,34 @@ proc checkEpochBatch() {.async.} =
   await sleepAsync(chronos.milliseconds(250))
   check payloads.len == 1
 
+proc checkBatchChunks() {.async.} =
+  testNow = 1_700_000_000
+  let epoch = uint64(testNow) div 10
+  let sp =
+    ModuleRlnProtection.new(moduleConfig(), registryCall(Hold(on: false))).tryGet()
+  sp.setNowUnix(testClock)
+  var payloads: seq[seq[byte]]
+  sp.setPublishCallback(
+    proc(topic: string, payload: seq[byte]): Future[Result[void, string]] {.async.} =
+      payloads.add(payload)
+      return ok()
+  )
+  check (await sp.start()).isOk
+  defer:
+    await sp.stop()
+  let total = MaxMetadataBatchEntries + 1
+  for i in 0 ..< total:
+    var proof: RateLimitProof
+    proof.nullifier[0] = byte(i)
+    proof.nullifier[1] = byte(i shr 8)
+    proof.epoch = epochField(epoch)
+    check (await sp.verifyProofAsync(proof.toBytes(), @[])).tryGet()
+  check payloads.len == 0
+  testNow += 10
+  waitUntil(payloads.len == 2)
+  check decodeMetadata(payloads[0]).tryGet().entries.len == MaxMetadataBatchEntries
+  check decodeMetadata(payloads[1]).tryGet().entries.len == 1
+
 proc checkPublishFailure() {.async.} =
   testNow = 1_700_000_000
   let epoch = uint64(testNow) div 10
@@ -378,11 +406,11 @@ proc checkBatchSpam() {.async.} =
   check decodeMetadata(aPayloads[0]).tryGet().entries[0].shareX[0] == 1
   check decodeMetadata(bPayloads[0]).tryGet().entries[0].shareX[0] == 2
 
-  let conflictsBefore = mix_rln_metadata_conflicts_total.value()
+  let conflictsBefore = mix_rln_metadata_conflicts.value()
   check b.handleProofMetadata(aPayloads[0]).isOk
   check a.handleProofMetadata(bPayloads[0]).isOk
   when defined(metrics):
-    check mix_rln_metadata_conflicts_total.value() == conflictsBefore + 2
+    check mix_rln_metadata_conflicts.value() == conflictsBefore + 2
 
 proc checkBatchSkips() {.async.} =
   testNow = 1_700_000_000
@@ -569,6 +597,13 @@ suite "Shared RLN module adapter":
 
   test "one epoch of proofs publishes one batch after the epoch ends":
     waitFor checkEpochBatch()
+  test "a batch over 500 entries is published as successive messages":
+    waitFor checkBatchChunks()
+  test "conflicts counter exports a single _total suffix":
+    when defined(metrics):
+      let rendered = $mix_rln_metadata_conflicts
+      check "# TYPE mix_rln_metadata_conflicts counter\n" in rendered
+      check "total_total" notin rendered
   test "disableMetadataBatch publishes each proof immediately":
     waitFor checkImmediatePublish()
   test "a failed batch publish is counted and dropped":
