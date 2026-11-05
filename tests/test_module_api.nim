@@ -325,6 +325,38 @@ proc checkPublishFailure() {.async.} =
   when defined(metrics):
     check mix_rln_metadata_publication_failures.value(["publish"]) == failuresBefore + 2
 
+proc checkStopTimeout() {.async.} =
+  testNow = 1_700_000_000
+  let epoch = uint64(testNow) div 10
+  var config = moduleConfig()
+  config.publishStopTimeoutMs = 50
+  let sp = ModuleRlnProtection.new(config, registryCall(Hold(on: false))).tryGet()
+  sp.setNowUnix(testClock)
+  var cancelled = false
+  sp.setPublishCallback(
+    proc(topic: string, payload: seq[byte]): Future[Result[void, string]] {.async.} =
+      try:
+        await sleepAsync(chronos.seconds(30))
+      except CancelledError:
+        cancelled = true
+        return err("cancelled")
+      return ok()
+  )
+  check (await sp.start()).isOk
+  var proof: RateLimitProof
+  proof.nullifier[0] = 1
+  proof.epoch = epochField(epoch)
+  check (await sp.verifyProofAsync(proof.toBytes(), @[])).tryGet()
+  mix_rln_metadata_publication_failures.inc(0, labelValues = ["cancelled"])
+  let before = mix_rln_metadata_publication_failures.value(["cancelled"])
+  let started = Moment.now()
+  await sp.stop()
+  check Moment.now() - started < chronos.seconds(1)
+  check cancelled
+  when defined(metrics):
+    check mix_rln_metadata_publication_failures.value(["cancelled"]) == before + 1
+  await sp.stop()
+
 proc checkStopFlushes() {.async.} =
   testNow = 1_700_000_000
   let epoch = uint64(testNow) div 10
@@ -610,6 +642,8 @@ suite "Shared RLN module adapter":
     waitFor checkPublishFailure()
   test "stop flushes the open batch and does not publish a late verify":
     waitFor checkStopFlushes()
+  test "stop cancels an in-flight publish after the timeout":
+    waitFor checkStopTimeout()
   test "both nodes flag a nullifier carried in the other node's batch":
     waitFor checkBatchSpam()
   test "a bad batch entry is skipped and the rest is applied":

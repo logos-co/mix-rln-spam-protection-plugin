@@ -5,7 +5,7 @@
 
 {.push raises: [].}
 
-import std/[json, times, tables, sequtils]
+import std/[json, times, tables]
 import chronos, results, metrics
 import stew/endians2
 from stew/byteutils import hexToSeqByte
@@ -42,6 +42,9 @@ type
     disableMetadataBatch*: bool
       ## False, the zero value, publishes one batch per epoch. True publishes
       ## each verified proof immediately as a one-entry MessagingMetadata.
+    publishStopTimeoutMs*: uint64
+      ## How long stop waits for in-flight metadata publishes. Zero uses
+      ## DefaultPublishStopTimeoutMs.
 
   ModuleRlnProtection* = ref object of SpamProtection
     config*: ModuleRlnConfig
@@ -52,7 +55,9 @@ type
     running: bool
     nowUnix: proc(): int64 {.gcsafe, raises: [].}
     metadataBatch: seq[ProofMetadataBroadcast]
-    batchPublishes: seq[Future[void]]
+    inFlight: Table[uint64, Future[void]]
+    nextPublishId: uint64
+    stopTimedOut: bool
 
 proc decodeField[N: static int](
     obj: JsonNode, key: string
@@ -121,6 +126,11 @@ proc scopedCall*(
 proc unixNow(): int64 {.gcsafe, raises: [].} =
   times.getTime().toUnix()
 
+const
+  MaxMetadataBatchEntries* = 500
+    ## One entry is about 173 bytes. 500 stays under Waku's 150 KiB message limit.
+  DefaultPublishStopTimeoutMs* = 2_000'u64
+
 proc new*(
     T: type ModuleRlnProtection, config: ModuleRlnConfig, call: RlnModuleCall
 ): Result[T, string] =
@@ -132,9 +142,12 @@ proc new*(
     return err("Invalid RLN epoch parameters")
   if config.metadataTopic.len == 0:
     return err("RLN coordination topic is required")
+  var stored = config
+  if stored.publishStopTimeoutMs == 0:
+    stored.publishStopTimeoutMs = DefaultPublishStopTimeoutMs
   return ok(
     T(
-      config: config,
+      config: stored,
       call: call,
       proofSize: RateLimitProofByteSize,
       metadataLog: newNullifierLog(),
@@ -164,14 +177,20 @@ proc broadcastMetadata(sp: ModuleRlnProtection, data: seq[byte]) {.async: (raise
 
 proc enqueuePublish(sp: ModuleRlnProtection, payload: seq[byte]) =
   ## Track the future without awaiting it, so cancelling the epoch loop does
-  ## not cancel the publish.
+  ## not cancel the publish. The future drops itself when it finishes.
   if sp.publish.isNil:
     return
-  sp.batchPublishes.keepItIf(not it.finished)
-  sp.batchPublishes.add(sp.broadcastMetadata(payload))
-
-const MaxMetadataBatchEntries* = 500
-  ## One entry is about 173 bytes. 500 stays under Waku's 150 KiB message limit.
+  let id = sp.nextPublishId
+  inc sp.nextPublishId
+  let broadcast = sp.broadcastMetadata(payload)
+  if broadcast.finished:
+    return
+  sp.inFlight[id] = broadcast
+  broadcast.addCallback(
+    proc(udata: pointer) {.gcsafe, raises: [].} =
+      var done: Future[void]
+      discard sp.inFlight.pop(id, done)
+  )
 
 proc publishBatch(sp: ModuleRlnProtection) =
   ## Hand the open batch to the publish callback, in chunks that fit one frame.
@@ -223,13 +242,34 @@ proc stop*(sp: ModuleRlnProtection) {.async: (raises: []).} =
   if not sp.epochLoop.isNil:
     await sp.epochLoop.cancelAndWait()
   sp.publishBatch()
-  sp.batchPublishes.keepItIf(not it.finished)
-  for broadcast in sp.batchPublishes:
+  var inflight = newSeqOfCap[Future[void]](sp.inFlight.len)
+  for broadcast in sp.inFlight.values:
+    inflight.add(broadcast)
+  sp.inFlight.clear()
+  let deadline = Moment.fromNow(milliseconds(int64(sp.config.publishStopTimeoutMs)))
+  for broadcast in inflight:
+    if broadcast.finished:
+      continue
+    let left = deadline - Moment.now()
+    if left == ZeroDuration:
+      break
+    # race does not cancel the publish. The deadline has to win before stop
+    # marks the rest as timed out, or a publisher error during the wait is
+    # counted as a cancellation.
+    let alarm = sleepAsync(left)
+    var broadcastDone = false
     try:
-      await broadcast
-    except CatchableError:
+      let winner = await race(FutureBase(broadcast), FutureBase(alarm))
+      broadcastDone = winner == FutureBase(broadcast)
+    except CancelledError:
       discard
-  sp.batchPublishes.setLen(0)
+    if not alarm.finished:
+      await alarm.cancelAndWait()
+    if not broadcastDone:
+      break
+  sp.stopTimedOut = true
+  await cancelAndWait(inflight)
+  sp.stopTimedOut = false
 
 method generateProofAsync*(
     sp: ModuleRlnProtection, bindingData: seq[byte], epoch: uint64
@@ -276,13 +316,20 @@ method isProofTokenValid*(
 proc broadcastMetadata(
     sp: ModuleRlnProtection, data: seq[byte]
 ) {.async: (raises: []).} =
+  ## stop sets stopTimedOut before it cancels. The publisher has raises: [],
+  ## so it catches CancelledError and returns a result instead of raising.
   try:
-    if (await sp.publish(sp.config.metadataTopic, data)).isErr:
-      mix_rln_metadata_publication_failures.inc(labelValues = ["publish"])
+    let published = await sp.publish(sp.config.metadataTopic, data)
+    if published.isErr:
+      mix_rln_metadata_publication_failures.inc(
+        labelValues = [if sp.stopTimedOut: "cancelled" else: "publish"]
+      )
   except CancelledError:
     mix_rln_metadata_publication_failures.inc(labelValues = ["cancelled"])
   except CatchableError:
-    mix_rln_metadata_publication_failures.inc(labelValues = ["publish"])
+    mix_rln_metadata_publication_failures.inc(
+      labelValues = [if sp.stopTimedOut: "cancelled" else: "publish"]
+    )
 
 method verifyProofAsync*(
     sp: ModuleRlnProtection, encodedProofData, bindingData: seq[byte]

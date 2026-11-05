@@ -33,9 +33,10 @@ supplied publish callback when the epoch changes, then clears it. More than
 nothing. `disableMetadataBatch` defaults to false, so a host
 that leaves the field unset keeps batching. Setting it publishes each verified
 proof immediately as a one-entry `MessagingMetadata`. Shutdown publishes
-whatever is still buffered and waits for that publish. Publication errors do
-not reject an otherwise valid packet; local duplicate detection remains
-active. `handleProofMetadata` accepts a `MessagingMetadata` of
+whatever is still buffered, waits up to `publishStopTimeoutMs` for in-flight
+publishes, and cancels what is still running. Zero means 2 seconds.
+Publication errors do not reject an otherwise valid packet; local duplicate
+detection remains active. `handleProofMetadata` accepts a `MessagingMetadata` of
 `ProofMetadataBroadcast` entries. It checks `maxEpochGap` per entry. A
 malformed entry is counted and skipped, and the rest of the payload is still
 applied. A bare single entry is rejected. The deployment must protect this
