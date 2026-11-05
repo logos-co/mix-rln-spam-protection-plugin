@@ -5,7 +5,7 @@
 
 {.push raises: [].}
 
-import std/[json, times, tables, sequtils]
+import std/[json, times, tables]
 import chronos, results, metrics
 import stew/endians2
 from stew/byteutils import hexToSeqByte
@@ -15,11 +15,21 @@ import ./[types, constants, codec, nullifier_log]
 export spam_protection
 
 declarePublicCounter mix_rln_metadata_publication_failures,
-  "Metadata broadcasts that failed or were dropped", labels = ["reason"]
+  "Metadata batch publishes that failed", labels = ["reason"]
+declarePublicHistogram mix_rln_metadata_batch_entries,
+  "Entries in a published coordination batch",
+  buckets = [1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0]
+declarePublicCounter mix_rln_metadata_entries_skipped,
+  "Coordination entries not applied", labels = ["reason"]
+declarePublicCounter mix_rln_metadata_conflicts,
+  "Received entries whose nullifier was already logged with different shares"
 declarePublicHistogram mix_rln_module_proof_seconds,
   "Module proof call latency including transport and backend queueing",
   labels = ["operation", "outcome"],
   buckets = [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 80.0]
+
+const MaxMetadataBatchEntries* = 500
+  ## One entry is about 173 bytes. 500 stays under Waku's 150 KiB message limit.
 
 type
   RlnModuleCall* = proc(
@@ -32,6 +42,15 @@ type
     epochSeconds*: uint64
     maxEpochGap*: uint64
     metadataTopic*: string
+    disableMetadataBatch*: bool
+      ## False, the zero value, publishes one batch per epoch. True publishes
+      ## each verified proof immediately as a one-entry MessagingMetadata.
+    maxMetadataBatchEntries*: uint64 = uint64(MaxMetadataBatchEntries)
+      ## Entries in one coordination message. The open batch also publishes
+      ## when the Mix epoch changes, whichever comes first.
+    publishStopTimeoutMs*: uint64
+      ## How long stop waits for in-flight metadata publishes. Zero uses
+      ## DefaultPublishStopTimeoutMs.
 
   ModuleRlnProtection* = ref object of SpamProtection
     config*: ModuleRlnConfig
@@ -40,7 +59,11 @@ type
     metadataLog: NullifierLog
     epochLoop: Future[void]
     running: bool
-    pendingBroadcasts: seq[Future[void]]
+    nowUnix: proc(): int64 {.gcsafe, raises: [].}
+    metadataBatch: seq[ProofMetadataBroadcast]
+    inFlight: Table[uint64, Future[void]]
+    nextPublishId: uint64
+    stopTimedOut: bool
 
 proc decodeField[N: static int](
     obj: JsonNode, key: string
@@ -106,6 +129,11 @@ proc scopedCall*(
     outcome = "success"
   return parsed
 
+proc unixNow(): int64 {.gcsafe, raises: [].} =
+  times.getTime().toUnix()
+
+const DefaultPublishStopTimeoutMs* = 2_000'u64
+
 proc new*(
     T: type ModuleRlnProtection, config: ModuleRlnConfig, call: RlnModuleCall
 ): Result[T, string] =
@@ -117,20 +145,31 @@ proc new*(
     return err("Invalid RLN epoch parameters")
   if config.metadataTopic.len == 0:
     return err("RLN coordination topic is required")
+  if config.maxMetadataBatchEntries == 0 or
+      config.maxMetadataBatchEntries > uint64(high(int)):
+    return err("Invalid RLN metadata batch size")
+  var stored = config
+  if stored.publishStopTimeoutMs == 0:
+    stored.publishStopTimeoutMs = DefaultPublishStopTimeoutMs
   return ok(
     T(
-      config: config,
+      config: stored,
       call: call,
       proofSize: RateLimitProofByteSize,
       metadataLog: newNullifierLog(),
+      nowUnix: unixNow,
     )
   )
 
 proc setPublishCallback*(sp: ModuleRlnProtection, publish: PublishCallback) =
   sp.publish = publish
 
+proc setNowUnix*(sp: ModuleRlnProtection, clock: proc(): int64 {.gcsafe, raises: [].}) =
+  ## Tests advance the epoch without sleeping. Hosts keep the wall clock.
+  sp.nowUnix = clock
+
 proc epochNow(sp: ModuleRlnProtection): uint64 =
-  uint64(times.getTime().toUnix()) div sp.config.epochSeconds
+  uint64(sp.nowUnix()) div sp.config.epochSeconds
 
 proc advanceEpoch(sp: ModuleRlnProtection, epoch: uint64) =
   var encoded: Epoch
@@ -140,6 +179,45 @@ proc advanceEpoch(sp: ModuleRlnProtection, epoch: uint64) =
   sp.metadataLog.prune(encoded, int(sp.config.maxEpochGap))
   sp.notifyEpochChange(epoch)
 
+proc broadcastMetadata(sp: ModuleRlnProtection, data: seq[byte]) {.async: (raises: []).}
+
+proc enqueuePublish(sp: ModuleRlnProtection, payload: seq[byte]) =
+  ## Track the future without awaiting it, so cancelling the epoch loop does
+  ## not cancel the publish. The future drops itself when it finishes.
+  if sp.publish.isNil:
+    return
+  let id = sp.nextPublishId
+  inc sp.nextPublishId
+  let broadcast = sp.broadcastMetadata(payload)
+  if broadcast.finished:
+    return
+  sp.inFlight[id] = broadcast
+  broadcast.addCallback(
+    proc(udata: pointer) {.gcsafe, raises: [].} =
+      var done: Future[void]
+      discard sp.inFlight.pop(id, done)
+  )
+
+proc metadataBatchLimit(sp: ModuleRlnProtection): int =
+  int(sp.config.maxMetadataBatchEntries)
+
+proc publishBatch(sp: ModuleRlnProtection) =
+  ## Hand the open batch to the publish callback, in chunks that fit one frame.
+  if sp.metadataBatch.len == 0 or sp.publish.isNil:
+    return
+  let limit = sp.metadataBatchLimit()
+  if limit < 1:
+    return
+  var offset = 0
+  while offset < sp.metadataBatch.len:
+    let count = min(limit, sp.metadataBatch.len - offset)
+    let payload =
+      MessagingMetadata(entries: sp.metadataBatch[offset ..< offset + count]).toBytes()
+    mix_rln_metadata_batch_entries.observe(float(count))
+    sp.enqueuePublish(payload)
+    offset += count
+  sp.metadataBatch.setLen(0)
+
 proc epochNotifications(sp: ModuleRlnProtection) {.async: (raises: [CancelledError]).} =
   var epoch = sp.epochNow()
   sp.advanceEpoch(epoch)
@@ -147,6 +225,7 @@ proc epochNotifications(sp: ModuleRlnProtection) {.async: (raises: [CancelledErr
     await sleepAsync(chronos.milliseconds(100))
     let current = sp.epochNow()
     if current != epoch:
+      sp.publishBatch()
       epoch = current
       sp.advanceEpoch(epoch)
 
@@ -174,9 +253,35 @@ proc stop*(sp: ModuleRlnProtection) {.async: (raises: []).} =
   sp.running = false
   if not sp.epochLoop.isNil:
     await sp.epochLoop.cancelAndWait()
-  for broadcast in sp.pendingBroadcasts:
-    await broadcast.cancelAndWait()
-  sp.pendingBroadcasts.setLen(0)
+  sp.publishBatch()
+  var inflight = newSeqOfCap[Future[void]](sp.inFlight.len)
+  for broadcast in sp.inFlight.values:
+    inflight.add(broadcast)
+  sp.inFlight.clear()
+  let deadline = Moment.fromNow(milliseconds(int64(sp.config.publishStopTimeoutMs)))
+  for broadcast in inflight:
+    if broadcast.finished:
+      continue
+    let left = deadline - Moment.now()
+    if left == ZeroDuration:
+      break
+    # race does not cancel the publish. The deadline has to win before stop
+    # marks the rest as timed out, or a publisher error during the wait is
+    # counted as a cancellation.
+    let alarm = sleepAsync(left)
+    var broadcastDone = false
+    try:
+      let winner = await race(FutureBase(broadcast), FutureBase(alarm))
+      broadcastDone = winner == FutureBase(broadcast)
+    except CancelledError:
+      discard
+    if not alarm.finished:
+      await alarm.cancelAndWait()
+    if not broadcastDone:
+      break
+  sp.stopTimedOut = true
+  await cancelAndWait(inflight)
+  sp.stopTimedOut = false
 
 method generateProofAsync*(
     sp: ModuleRlnProtection, bindingData: seq[byte], epoch: uint64
@@ -223,13 +328,20 @@ method isProofTokenValid*(
 proc broadcastMetadata(
     sp: ModuleRlnProtection, data: seq[byte]
 ) {.async: (raises: []).} =
+  ## stop sets stopTimedOut before it cancels. The publisher has raises: [],
+  ## so it catches CancelledError and returns a result instead of raising.
   try:
-    if (await sp.publish(sp.config.metadataTopic, data)).isErr:
-      mix_rln_metadata_publication_failures.inc(labelValues = ["publish"])
+    let published = await sp.publish(sp.config.metadataTopic, data)
+    if published.isErr:
+      mix_rln_metadata_publication_failures.inc(
+        labelValues = [if sp.stopTimedOut: "cancelled" else: "publish"]
+      )
   except CancelledError:
     mix_rln_metadata_publication_failures.inc(labelValues = ["cancelled"])
   except CatchableError:
-    mix_rln_metadata_publication_failures.inc(labelValues = ["publish"])
+    mix_rln_metadata_publication_failures.inc(
+      labelValues = [if sp.stopTimedOut: "cancelled" else: "publish"]
+    )
 
 method verifyProofAsync*(
     sp: ModuleRlnProtection, encodedProofData, bindingData: seq[byte]
@@ -275,26 +387,27 @@ method verifyProofAsync*(
       return ok(false)
   except KeyError:
     return err("RLN coordination cache failure")
-  let frame = ProofMetadataBroadcast(
+  let entry = ProofMetadataBroadcast(
     nullifier: proof.nullifier,
     shareX: proof.shareX,
     shareY: proof.shareY,
     externalNullifier: ext,
     epoch: proof.epoch,
   )
-  sp.pendingBroadcasts.keepItIf(not it.finished)
-  if sp.pendingBroadcasts.len >= 64:
-    mix_rln_metadata_publication_failures.inc(labelValues = ["capacity"])
+  if sp.config.disableMetadataBatch:
+    let payload = MessagingMetadata(entries: @[entry]).toBytes()
+    mix_rln_metadata_batch_entries.observe(1.0)
+    sp.enqueuePublish(payload)
   else:
-    sp.pendingBroadcasts.add(sp.broadcastMetadata(frame.toBytes()))
+    sp.metadataBatch.add(entry)
+    if sp.metadataBatch.len >= sp.metadataBatchLimit():
+      sp.publishBatch()
   return ok(true)
 
-proc handleProofMetadata*(
-    sp: ModuleRlnProtection, data: seq[byte]
+proc applyMetadataEntry(
+    sp: ModuleRlnProtection, entry: ProofMetadataBroadcast
 ): Result[void, string] =
-  let frame = ProofMetadataBroadcast.decode(data).valueOr:
-    return err("Invalid RLN metadata: " & $error)
-  let epoch = uint64.fromBytesLE(frame.epoch.toOpenArray(0, 7))
+  let epoch = uint64.fromBytesLE(entry.epoch.toOpenArray(0, 7))
   let current = sp.epochNow()
   let gap =
     if current > epoch:
@@ -302,9 +415,25 @@ proc handleProofMetadata*(
     else:
       epoch - current
   if gap > sp.config.maxEpochGap:
-    return err("RLN metadata epoch out of range")
+    mix_rln_metadata_entries_skipped.inc(labelValues = ["epoch_gap"])
+    return ok()
   try:
-    discard sp.metadataLog.handleNetworkMetadata(frame)
+    let seen = sp.metadataLog.handleNetworkMetadata(entry)
+    if seen.isSpam:
+      mix_rln_metadata_conflicts.inc()
     return ok()
   except KeyError:
     return err("RLN coordination cache failure")
+
+proc handleProofMetadata*(
+    sp: ModuleRlnProtection, data: seq[byte]
+): Result[void, string] =
+  let decoded = decodeMetadata(data).valueOr:
+    return err("Invalid RLN metadata: " & $error)
+  for _ in 0 ..< decoded.malformed:
+    mix_rln_metadata_entries_skipped.inc(labelValues = ["malformed"])
+  for entry in decoded.entries:
+    let applied = sp.applyMetadataEntry(entry)
+    if applied.isErr:
+      return applied
+  ok()

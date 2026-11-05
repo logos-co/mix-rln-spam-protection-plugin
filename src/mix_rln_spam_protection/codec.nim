@@ -21,6 +21,22 @@
 ##     uint64 user_message_limit = 3;
 ##     uint64 index = 4;
 ##   }
+##
+##   message ProofMetadataEntry {
+##     bytes nullifier = 1;
+##     bytes share_x = 2;
+##     bytes share_y = 3;
+##     bytes external_nullifier = 4;
+##     bytes epoch = 5;
+##   }
+##
+##   message MessagingMetadata {
+##     repeated ProofMetadataEntry entries = 1;
+##   }
+##
+## ProofMetadataEntry is the flat ProofMetadataBroadcast encoding. The
+## coordination payload is MessagingMetadata, including a message of one
+## entry. A bare entry is not a payload.
 
 {.push raises: [].}
 
@@ -151,11 +167,10 @@ proc decode*(T: type MembershipUpdate, buffer: seq[byte]): ProtobufResult[T] =
   ok(update)
 
 # ProofMetadataBroadcast encoding/decoding
-# Note: This maps to a simplified version for backward compatibility
+# One entry. A batch is a repeated list of these encodings.
 
 proc encode*(broadcast: ProofMetadataBroadcast): ProtoBuffer =
-  ## Encode a ProofMetadataBroadcast to protobuf.
-  ## Uses a flat structure for single proof metadata broadcast.
+  ## Encode one proof-metadata entry to protobuf.
   var buf = initProtoBuffer()
 
   buf.write3(1, @(broadcast.nullifier))
@@ -222,5 +237,48 @@ proc toBytes*(update: MembershipUpdate): seq[byte] =
   update.encode().buffer
 
 proc toBytes*(broadcast: ProofMetadataBroadcast): seq[byte] =
-  ## Serialize a ProofMetadataBroadcast to bytes using protobuf.
+  ## Serialize one proof-metadata entry to bytes using protobuf.
   broadcast.encode().buffer
+
+type DecodedMetadata* = object
+  entries*: seq[ProofMetadataBroadcast]
+  malformed*: int ## Entry blobs inside a batch that did not decode.
+
+proc encode*(batch: MessagingMetadata): ProtoBuffer =
+  ## Encode a batch as repeated ProofMetadataEntry messages.
+  var buf = initProtoBuffer()
+  for entry in batch.entries:
+    buf.write3(1, entry.toBytes())
+  buf.finish3()
+  buf
+
+proc toBytes*(batch: MessagingMetadata): seq[byte] =
+  ## Serialize a proof-metadata batch to bytes using protobuf.
+  batch.encode().buffer
+
+proc decodeMetadata*(data: seq[byte]): ProtobufResult[DecodedMetadata] =
+  ## Decode a MessagingMetadata. A bad entry is counted in `malformed` and
+  ## the entries that decoded are still returned. A bare entry is an error.
+  # A bare ProofMetadataBroadcast carries share_x at the top level.
+  var topLevelShare: seq[byte]
+  let shareField = initProtoBuffer(data).getField(2, topLevelShare)
+  if shareField.isErr:
+    return err(shareField.error)
+  if shareField.get():
+    return err(ProtobufError.invalidLengthField("proof_metadata"))
+
+  var raw: seq[seq[byte]]
+  let found = initProtoBuffer(data).getRepeatedField(1, raw)
+  if found.isErr:
+    return err(found.error)
+  if not found.get():
+    return err(ProtobufError.missingRequiredField("entries"))
+
+  var decoded = DecodedMetadata()
+  for blob in raw:
+    let entry = ProofMetadataBroadcast.decode(blob)
+    if entry.isOk:
+      decoded.entries.add(entry.get())
+    else:
+      inc decoded.malformed
+  ok(decoded)
