@@ -296,13 +296,13 @@ proc checkTunedBatchSize() {.async.} =
   testNow = 1_700_000_000
   let epoch = uint64(testNow) div 10
   var config = moduleConfig()
-  check config.maxMetadataBatchEntries == 0
+  check config.maxMetadataBatchEntries == uint64(MaxMetadataBatchEntries)
+  var zero = config
+  zero.maxMetadataBatchEntries = 0
+  check ModuleRlnProtection.new(zero, registryCall(Hold(on: false))).isErr
   config.maxMetadataBatchEntries = 2
   let sp = ModuleRlnProtection.new(config, registryCall(Hold(on: false))).tryGet()
   check sp.config.maxMetadataBatchEntries == 2
-  let defaults =
-    ModuleRlnProtection.new(moduleConfig(), registryCall(Hold(on: false))).tryGet()
-  check defaults.config.maxMetadataBatchEntries == uint64(MaxMetadataBatchEntries)
   sp.setNowUnix(testClock)
   var payloads: seq[seq[byte]]
   sp.setPublishCallback(

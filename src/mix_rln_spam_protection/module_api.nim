@@ -28,6 +28,9 @@ declarePublicHistogram mix_rln_module_proof_seconds,
   labels = ["operation", "outcome"],
   buckets = [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 80.0]
 
+const MaxMetadataBatchEntries* = 500
+  ## One entry is about 173 bytes. 500 stays under Waku's 150 KiB message limit.
+
 type
   RlnModuleCall* = proc(
     methodName: string, args: JsonNode
@@ -42,10 +45,9 @@ type
     disableMetadataBatch*: bool
       ## False, the zero value, publishes one batch per epoch. True publishes
       ## each verified proof immediately as a one-entry MessagingMetadata.
-    maxMetadataBatchEntries*: uint64
+    maxMetadataBatchEntries*: uint64 = uint64(MaxMetadataBatchEntries)
       ## Entries in one coordination message. The open batch also publishes
-      ## when the Mix epoch changes, whichever comes first. Zero uses
-      ## MaxMetadataBatchEntries.
+      ## when the Mix epoch changes, whichever comes first.
     publishStopTimeoutMs*: uint64
       ## How long stop waits for in-flight metadata publishes. Zero uses
       ## DefaultPublishStopTimeoutMs.
@@ -130,10 +132,7 @@ proc scopedCall*(
 proc unixNow(): int64 {.gcsafe, raises: [].} =
   times.getTime().toUnix()
 
-const
-  MaxMetadataBatchEntries* = 500
-    ## One entry is about 173 bytes. 500 stays under Waku's 150 KiB message limit.
-  DefaultPublishStopTimeoutMs* = 2_000'u64
+const DefaultPublishStopTimeoutMs* = 2_000'u64
 
 proc new*(
     T: type ModuleRlnProtection, config: ModuleRlnConfig, call: RlnModuleCall
@@ -146,9 +145,10 @@ proc new*(
     return err("Invalid RLN epoch parameters")
   if config.metadataTopic.len == 0:
     return err("RLN coordination topic is required")
+  if config.maxMetadataBatchEntries == 0 or
+      config.maxMetadataBatchEntries > uint64(high(int)):
+    return err("Invalid RLN metadata batch size")
   var stored = config
-  if stored.maxMetadataBatchEntries == 0:
-    stored.maxMetadataBatchEntries = uint64(MaxMetadataBatchEntries)
   if stored.publishStopTimeoutMs == 0:
     stored.publishStopTimeoutMs = DefaultPublishStopTimeoutMs
   return ok(
@@ -199,19 +199,15 @@ proc enqueuePublish(sp: ModuleRlnProtection, payload: seq[byte]) =
   )
 
 proc metadataBatchLimit(sp: ModuleRlnProtection): int =
-  ## A zero or oversized config falls back to the default. The fallback keeps
-  ## the publish loop from slicing zero entries.
-  let configured = sp.config.maxMetadataBatchEntries
-  if configured == 0 or configured > uint64(high(int)):
-    MaxMetadataBatchEntries
-  else:
-    int(configured)
+  int(sp.config.maxMetadataBatchEntries)
 
 proc publishBatch(sp: ModuleRlnProtection) =
   ## Hand the open batch to the publish callback, in chunks that fit one frame.
   if sp.metadataBatch.len == 0 or sp.publish.isNil:
     return
   let limit = sp.metadataBatchLimit()
+  if limit < 1:
+    return
   var offset = 0
   while offset < sp.metadataBatch.len:
     let count = min(limit, sp.metadataBatch.len - offset)

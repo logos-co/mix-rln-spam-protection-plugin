@@ -28,7 +28,7 @@ malformed proof, failed request, or missing field fails closed.
 
 A successful validation appends one entry to the current batch and returns.
 The batch publishes when it reaches `maxMetadataBatchEntries` or the Mix
-epoch changes, whichever comes first, then clears. Zero means 500. One entry
+epoch changes, whichever comes first, then clears. It defaults to 500. One entry
 is about 173 bytes, and 500 stays under Waku's 150 KiB default. A host whose
 relay limit differs sets the entry count to match. An empty epoch publishes
 nothing. `disableMetadataBatch` defaults to false, so a host
