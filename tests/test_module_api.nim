@@ -110,7 +110,7 @@ proc checkAdapter() {.async.} =
     epoch: decoded.epoch,
   )
   inc frame.shareX[0]
-  check sp.handleProofMetadata(ProofMetadataBatch(entries: @[frame]).toBytes()).isOk
+  check sp.handleProofMetadata(MessagingMetadata(entries: @[frame]).toBytes()).isOk
   verdict = "valid"
   check not (await sp.verifyProofAsync(proof.proof, @[1.byte, 2, 3])).tryGet()
   check published == 0
@@ -548,7 +548,7 @@ suite "Shared RLN module adapter":
     entry.epoch[0] = 5
     var second = entry
     second.nullifier[0] = 8
-    let batch = ProofMetadataBatch(entries: @[entry, second])
+    let batch = MessagingMetadata(entries: @[entry, second])
     check ProofMetadataBroadcast.decode(batch.toBytes()).isErr
     let decoded = decodeMetadata(batch.toBytes()).tryGet()
     check decoded.malformed == 0
@@ -556,7 +556,7 @@ suite "Shared RLN module adapter":
     check decoded.entries[0].nullifier == entry.nullifier
     check decoded.entries[1].shareX == second.shareX
     check decodeMetadata(entry.toBytes()).isErr
-    let one = decodeMetadata(ProofMetadataBatch(entries: @[entry]).toBytes()).tryGet()
+    let one = decodeMetadata(MessagingMetadata(entries: @[entry]).toBytes()).tryGet()
     check one.malformed == 0
     check one.entries.len == 1
     check one.entries[0].nullifier == entry.nullifier

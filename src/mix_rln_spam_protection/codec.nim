@@ -30,13 +30,13 @@
 ##     bytes epoch = 5;
 ##   }
 ##
-##   message ProofMetadataBatch {
+##   message MessagingMetadata {
 ##     repeated ProofMetadataEntry entries = 1;
 ##   }
 ##
 ## ProofMetadataEntry is the flat ProofMetadataBroadcast encoding. The
-## coordination payload is a ProofMetadataBatch, including a batch of one.
-## A bare entry is not a payload.
+## coordination payload is MessagingMetadata, including a message of one
+## entry. A bare entry is not a payload.
 
 {.push raises: [].}
 
@@ -244,7 +244,7 @@ type DecodedMetadata* = object
   entries*: seq[ProofMetadataBroadcast]
   malformed*: int ## Entry blobs inside a batch that did not decode.
 
-proc encode*(batch: ProofMetadataBatch): ProtoBuffer =
+proc encode*(batch: MessagingMetadata): ProtoBuffer =
   ## Encode a batch as repeated ProofMetadataEntry messages.
   var buf = initProtoBuffer()
   for entry in batch.entries:
@@ -252,12 +252,12 @@ proc encode*(batch: ProofMetadataBatch): ProtoBuffer =
   buf.finish3()
   buf
 
-proc toBytes*(batch: ProofMetadataBatch): seq[byte] =
+proc toBytes*(batch: MessagingMetadata): seq[byte] =
   ## Serialize a proof-metadata batch to bytes using protobuf.
   batch.encode().buffer
 
 proc decodeMetadata*(data: seq[byte]): ProtobufResult[DecodedMetadata] =
-  ## Decode a ProofMetadataBatch. A bad entry is counted in `malformed` and
+  ## Decode a MessagingMetadata. A bad entry is counted in `malformed` and
   ## the entries that decoded are still returned. A bare entry is an error.
   # A bare ProofMetadataBroadcast carries share_x at the top level.
   var topLevelShare: seq[byte]

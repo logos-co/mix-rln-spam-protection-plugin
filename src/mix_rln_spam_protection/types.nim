@@ -107,8 +107,8 @@ type
     externalNullifier*: ExternalNullifier
     epoch*: Epoch
 
-  ProofMetadataBatch* = object
-    ## Entries verified during one Mix epoch, published as one frame.
+  MessagingMetadata* = object
+    ## Coordination payload from the Mix RLN spec. One or more entries.
     entries*: seq[ProofMetadataBroadcast]
 
   # Callback types for coordination layer integration

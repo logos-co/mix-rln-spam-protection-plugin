@@ -41,7 +41,7 @@ type
     metadataTopic*: string
     disableMetadataBatch*: bool
       ## False, the zero value, publishes one batch per epoch. True publishes
-      ## each verified proof immediately as a one-entry ProofMetadataBatch.
+      ## each verified proof immediately as a one-entry MessagingMetadata.
 
   ModuleRlnProtection* = ref object of SpamProtection
     config*: ModuleRlnConfig
@@ -175,7 +175,7 @@ proc publishBatch(sp: ModuleRlnProtection) =
   if sp.metadataBatch.len == 0 or sp.publish.isNil:
     return
   let count = sp.metadataBatch.len
-  let payload = ProofMetadataBatch(entries: sp.metadataBatch).toBytes()
+  let payload = MessagingMetadata(entries: sp.metadataBatch).toBytes()
   sp.metadataBatch.setLen(0)
   mix_rln_metadata_batch_entries.observe(float(count))
   sp.enqueuePublish(payload)
@@ -329,7 +329,7 @@ method verifyProofAsync*(
     epoch: proof.epoch,
   )
   if sp.config.disableMetadataBatch:
-    let payload = ProofMetadataBatch(entries: @[entry]).toBytes()
+    let payload = MessagingMetadata(entries: @[entry]).toBytes()
     mix_rln_metadata_batch_entries.observe(1.0)
     sp.enqueuePublish(payload)
   else:
