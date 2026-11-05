@@ -34,8 +34,9 @@
 ##     repeated ProofMetadataEntry entries = 1;
 ##   }
 ##
-## ProofMetadataEntry is the flat ProofMetadataBroadcast encoding. A publisher
-## sends either one batch or one bare entry. Decoders accept either.
+## ProofMetadataEntry is the flat ProofMetadataBroadcast encoding. The
+## coordination payload is a ProofMetadataBatch, including a batch of one.
+## A bare entry is not a payload.
 
 {.push raises: [].}
 
@@ -256,12 +257,15 @@ proc toBytes*(batch: ProofMetadataBatch): seq[byte] =
   batch.encode().buffer
 
 proc decodeMetadata*(data: seq[byte]): ProtobufResult[DecodedMetadata] =
-  ## Decode a legacy single entry or a batch of entries.
-  ## A batch with a bad entry yields that entry in `malformed` and still
-  ## returns the entries that decoded. A broken legacy frame is an error.
-  let single = ProofMetadataBroadcast.decode(data)
-  if single.isOk:
-    return ok(DecodedMetadata(entries: @[single.get()]))
+  ## Decode a ProofMetadataBatch. A bad entry is counted in `malformed` and
+  ## the entries that decoded are still returned. A bare entry is an error.
+  # A bare ProofMetadataBroadcast carries share_x at the top level.
+  var topLevelShare: seq[byte]
+  let shareField = initProtoBuffer(data).getField(2, topLevelShare)
+  if shareField.isErr:
+    return err(shareField.error)
+  if shareField.get():
+    return err(ProtobufError.invalidLengthField("proof_metadata"))
 
   var raw: seq[seq[byte]]
   let found = initProtoBuffer(data).getRepeatedField(1, raw)
@@ -269,14 +273,6 @@ proc decodeMetadata*(data: seq[byte]): ProtobufResult[DecodedMetadata] =
     return err(found.error)
   if not found.get():
     return err(ProtobufError.missingRequiredField("entries"))
-
-  # Legacy frames carry share_x at the top level. A batch does not.
-  var topLevelShare: seq[byte]
-  let shareField = initProtoBuffer(data).getField(2, topLevelShare)
-  if shareField.isErr:
-    return err(shareField.error)
-  if shareField.get():
-    return err(ProtobufError.invalidLengthField("proof_metadata"))
 
   var decoded = DecodedMetadata()
   for blob in raw:

@@ -110,7 +110,7 @@ proc checkAdapter() {.async.} =
     epoch: decoded.epoch,
   )
   inc frame.shareX[0]
-  check sp.handleProofMetadata(frame.toBytes()).isOk
+  check sp.handleProofMetadata(ProofMetadataBatch(entries: @[frame]).toBytes()).isOk
   verdict = "valid"
   check not (await sp.verifyProofAsync(proof.proof, @[1.byte, 2, 3])).tryGet()
   check published == 0
@@ -206,9 +206,11 @@ proc checkImmediatePublish() {.async.} =
     proof.epoch = epochField(epoch)
     check (await sp.verifyProofAsync(proof.toBytes(), @[])).tryGet()
     waitUntil(payloads.len == i + 1)
-    check ProofMetadataBroadcast.decode(payloads[i]).isOk
-    check decodeMetadata(payloads[i]).tryGet().entries.len == 1
-    check decodeMetadata(payloads[i]).tryGet().entries[0].nullifier[0] == byte(i + 1)
+    check ProofMetadataBroadcast.decode(payloads[i]).isErr
+    let decoded = decodeMetadata(payloads[i]).tryGet()
+    check decoded.malformed == 0
+    check decoded.entries.len == 1
+    check decoded.entries[0].nullifier[0] == byte(i + 1)
   testNow += 10
   await sleepAsync(chronos.milliseconds(250))
   check payloads.len == 2
@@ -537,7 +539,7 @@ proc checkLatency() {.async.} =
     check (await sp.scopedCall(operation)).isErr
 
 suite "Shared RLN module adapter":
-  test "metadata batch roundtrip keeps a legacy single entry":
+  test "metadata batch roundtrip rejects a bare entry":
     var entry: ProofMetadataBroadcast
     entry.nullifier[0] = 1
     entry.shareX[0] = 2
@@ -553,9 +555,11 @@ suite "Shared RLN module adapter":
     check decoded.entries.len == 2
     check decoded.entries[0].nullifier == entry.nullifier
     check decoded.entries[1].shareX == second.shareX
-    let legacy = decodeMetadata(entry.toBytes()).tryGet()
-    check legacy.entries.len == 1
-    check legacy.malformed == 0
+    check decodeMetadata(entry.toBytes()).isErr
+    let one = decodeMetadata(ProofMetadataBatch(entries: @[entry]).toBytes()).tryGet()
+    check one.malformed == 0
+    check one.entries.len == 1
+    check one.entries[0].nullifier == entry.nullifier
     check decodeMetadata(@[1.byte, 2, 3]).isErr
     var broken = initProtoBuffer()
     broken.write3(1, @[1.byte])
