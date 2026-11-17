@@ -33,14 +33,19 @@ is about 173 bytes, and 500 stays under Waku's 150 KiB default. A host whose
 relay limit differs sets the entry count to match. An empty epoch publishes
 nothing. `disableMetadataBatch` defaults to false, so a host
 that leaves the field unset keeps batching. Setting it publishes each verified
-proof immediately as a one-entry `MessagingMetadata`. Shutdown publishes
+proof immediately as a one-entry `MessagingMetadata`. In that mode in-flight
+publishes are not capped, so a publish callback that stalls holds one pending
+publish per verified proof. Shutdown publishes
 whatever is still buffered, waits up to `publishStopTimeoutMs` for in-flight
-publishes, and cancels what is still running. Zero means 2 seconds.
+publishes, and cancels what is still running. Zero means 2 seconds. Shutdown
+then waits for the cancelled publishes to return, so the publish callback must
+return promptly when cancelled.
 Publication errors do not reject an otherwise valid packet; local duplicate
 detection remains active. `handleProofMetadata` accepts a `MessagingMetadata` of
 `ProofMetadataBroadcast` entries. It checks `maxEpochGap` per entry. A
 malformed entry is counted and skipped, and the rest of the payload is still
-applied. A bare single entry is rejected. The deployment must protect this
+applied. A payload with no valid entry is rejected, which includes a bare
+single entry. The deployment must protect this
 coordination channel; Logos Mixnet requires RLN-protected Relay. Registry membership
 synchronization belongs to the backend, so this mode does not gossip membership
 announcements.

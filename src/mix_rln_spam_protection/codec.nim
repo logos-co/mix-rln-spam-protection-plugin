@@ -258,15 +258,9 @@ proc toBytes*(batch: MessagingMetadata): seq[byte] =
 
 proc decodeMetadata*(data: seq[byte]): ProtobufResult[DecodedMetadata] =
   ## Decode a MessagingMetadata. A bad entry is counted in `malformed` and
-  ## the entries that decoded are still returned. A bare entry is an error.
-  # A bare ProofMetadataBroadcast carries share_x at the top level.
-  var topLevelShare: seq[byte]
-  let shareField = initProtoBuffer(data).getField(2, topLevelShare)
-  if shareField.isErr:
-    return err(shareField.error)
-  if shareField.get():
-    return err(ProtobufError.invalidLengthField("proof_metadata"))
-
+  ## the entries that decoded are still returned. A payload with no entry
+  ## that decodes is an error, which covers a bare entry: its field 1 is a
+  ## 32-byte nullifier, not an entry.
   var raw: seq[seq[byte]]
   let found = initProtoBuffer(data).getRepeatedField(1, raw)
   if found.isErr:
@@ -281,4 +275,6 @@ proc decodeMetadata*(data: seq[byte]): ProtobufResult[DecodedMetadata] =
       decoded.entries.add(entry.get())
     else:
       inc decoded.malformed
+  if decoded.entries.len == 0:
+    return err(ProtobufError.missingRequiredField("entries"))
   ok(decoded)

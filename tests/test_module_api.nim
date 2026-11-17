@@ -658,6 +658,11 @@ suite "Shared RLN module adapter":
     broken.write3(2, @[2.byte])
     broken.finish3()
     check decodeMetadata(broken.buffer).isErr
+    var junk = initProtoBuffer()
+    junk.write3(1, @[1.byte, 2, 3])
+    junk.write3(1, newSeq[byte]())
+    junk.finish3()
+    check decodeMetadata(junk.buffer).isErr
 
   test "one epoch of proofs publishes one batch after the epoch ends":
     waitFor checkEpochBatch()
