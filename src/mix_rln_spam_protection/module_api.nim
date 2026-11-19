@@ -6,7 +6,7 @@
 {.push raises: [].}
 
 import std/[json, times, tables]
-import chronos, results, metrics
+import chronos, chronicles, results, metrics
 import stew/endians2
 from stew/byteutils import hexToSeqByte
 import libp2p_mix/spam_protection
@@ -171,6 +171,17 @@ proc setNowUnix*(sp: ModuleRlnProtection, clock: proc(): int64 {.gcsafe, raises:
 proc epochNow(sp: ModuleRlnProtection): uint64 =
   uint64(sp.nowUnix()) div sp.config.epochSeconds
 
+# TEST-ONLY coordination trace (branch test/batch-coord-trace). Lines carry
+# "mixcoord" so a harness run can grep them; nullifiers are a 16-hex prefix.
+proc nfHex(b: openArray[byte]): string =
+  const digits = "0123456789abcdef"
+  for i in 0 ..< min(8, b.len):
+    result.add digits[int(b[i] shr 4)]
+    result.add digits[int(b[i] and 0x0f)]
+
+proc epochOf(e: Epoch): uint64 =
+  uint64.fromBytesLE(e.toOpenArray(0, 7))
+
 proc advanceEpoch(sp: ModuleRlnProtection, epoch: uint64) =
   var encoded: Epoch
   let epochBytes = toBytesLE(epoch)
@@ -213,6 +224,11 @@ proc publishBatch(sp: ModuleRlnProtection) =
     let count = min(limit, sp.metadataBatch.len - offset)
     let payload =
       MessagingMetadata(entries: sp.metadataBatch[offset ..< offset + count]).toBytes()
+    var nfs: seq[string]
+    for e in sp.metadataBatch[offset ..< offset + count]:
+      nfs.add(e.nullifier.nfHex() & "@" & $e.epoch.epochOf())
+    info "mixcoord batch publish",
+      nowEpoch = sp.epochNow(), entries = count, bytes = payload.len, nullifiers = nfs
     mix_rln_metadata_batch_entries.observe(float(count))
     sp.enqueuePublish(payload)
     offset += count
@@ -333,6 +349,7 @@ proc broadcastMetadata(
   try:
     let published = await sp.publish(sp.config.metadataTopic, data)
     if published.isErr:
+      info "mixcoord batch publish failed", bytes = data.len, error = published.error
       mix_rln_metadata_publication_failures.inc(
         labelValues = [if sp.stopTimedOut: "cancelled" else: "publish"]
       )
@@ -383,6 +400,9 @@ method verifyProofAsync*(
         externalNullifier: ext,
       )
     )
+    info "mixcoord local verify",
+      nullifier = proof.nullifier.nfHex(), epoch = proof.epoch.epochOf(),
+      spam = seen.isSpam, duplicate = seen.isDuplicate
     if seen.isSpam or seen.isDuplicate:
       return ok(false)
   except KeyError:
@@ -415,10 +435,20 @@ proc applyMetadataEntry(
     else:
       epoch - current
   if gap > sp.config.maxEpochGap:
+    info "mixcoord remote entry",
+      nullifier = entry.nullifier.nfHex(), epoch = epoch, nowEpoch = current,
+      result = "skipped_epoch_gap"
     mix_rln_metadata_entries_skipped.inc(labelValues = ["epoch_gap"])
     return ok()
   try:
     let seen = sp.metadataLog.handleNetworkMetadata(entry)
+    let outcome =
+      if seen.isSpam: "spam"
+      elif seen.isDuplicate: "duplicate"
+      else: "stored"
+    info "mixcoord remote entry",
+      nullifier = entry.nullifier.nfHex(), epoch = epoch, nowEpoch = current,
+      result = outcome
     if seen.isSpam:
       mix_rln_metadata_conflicts.inc()
     return ok()
@@ -429,7 +459,10 @@ proc handleProofMetadata*(
     sp: ModuleRlnProtection, data: seq[byte]
 ): Result[void, string] =
   let decoded = decodeMetadata(data).valueOr:
+    info "mixcoord batch rejected", bytes = data.len, error = $error
     return err("Invalid RLN metadata: " & $error)
+  info "mixcoord batch received",
+    bytes = data.len, entries = decoded.entries.len, malformed = decoded.malformed
   for _ in 0 ..< decoded.malformed:
     mix_rln_metadata_entries_skipped.inc(labelValues = ["malformed"])
   for entry in decoded.entries:
