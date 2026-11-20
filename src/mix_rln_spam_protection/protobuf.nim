@@ -8,7 +8,7 @@
 {.push raises: [].}
 
 import std/options
-import libp2p/protobuf/minprotobuf
+import ./minprotobuf
 import libp2p/varint
 
 export minprotobuf, varint

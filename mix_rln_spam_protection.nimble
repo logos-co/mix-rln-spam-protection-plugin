@@ -23,6 +23,7 @@ requires "https://github.com/logos-co/nim-libp2p-mix#3f256aa03d2d36fea0b5206b41a
 # Tasks
 task test, "Run tests that do not require librln":
   exec "nim c -r -d:metrics -d:metricsTest tests/test_module_api.nim"
+  exec "nim c -r tests/test_codec.nim"
 
 task testRLN, "Run tests that require librln":
   # Requires librln.a in current directory or set LIBRLN_PATH env var
