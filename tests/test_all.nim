@@ -28,6 +28,7 @@ import libp2p_mix/spam_protection as libp2p_spam
 # Use std/unittest (testutils/unittests available in logos-messaging-nim context)
 import std/unittest
 
+from std/strutils import repeat
 # =============================================================================
 # TEST CONSTANTS
 # =============================================================================
@@ -233,13 +234,8 @@ suite "Type Serialization":
     # Under stake-weighted registration there is no network-wide default
     # rate, so user_message_limit is a required field. Build the buffer by
     # hand with field 3 left out.
-    var commitment: IDCommitment
-    var buf = initProtoBuffer()
-    buf.write3(1, uint32(ord(MembershipAction.Add)))
-    buf.write3(2, @(commitment))
-    buf.write3(4, 1'u64)
-    buf.finish3()
-    check MembershipUpdate.decode(buf.buffer).isErr
+    let buf = fromHex("0800" & "1220" & "00".repeat(HashByteSize) & "2001")
+    check MembershipUpdate.decode(buf).isErr
 
   test "ProofMetadataBroadcast serialization roundtrip":
     var broadcast: ProofMetadataBroadcast

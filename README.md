@@ -260,7 +260,7 @@ plugin.groupManager.loadTreeSnapshot(cast[seq[byte]](data))
 
 ## Testing
 
-Run the module-adapter tests, which do not require the native RLN library:
+Run the module-adapter and codec wire-format tests, which do not require the native RLN library:
 
 ```bash
 nimble test
