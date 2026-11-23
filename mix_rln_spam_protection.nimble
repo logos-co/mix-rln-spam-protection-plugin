@@ -18,8 +18,8 @@ requires "json_serialization >= 0.2.0"
 requires "protobuf_serialization >= 0.6.2"
 
 # Keep the plugin and standalone Mix facade on compatible libp2p/Mix APIs.
-requires "libp2p >= 2.3.1"
-requires "https://github.com/logos-co/nim-libp2p-mix#3f256aa03d2d36fea0b5206b41a6328da4f5c412"
+requires "libp2p >= 2.4.0"
+requires "https://github.com/logos-co/nim-libp2p-mix#ed6a72a990143cfc6b667223c7d0c38e408b348e"
 
 # Tasks
 task test, "Run tests that do not require librln":
