@@ -53,13 +53,13 @@ proc copyBytesField[N: static int](
     return err(ProtobufError.invalidLengthField(name))
   copyMem(addr dest[0], unsafeAddr bytes[0], N)
   ok()
-  
+
 proc decodeRateLimitProofPB(buffer: seq[byte]): ProtobufResult[RateLimitProofPB] =
   try:
     ok(Protobuf.decode(buffer, RateLimitProofPB))
   except SerializationError as e:
     err(ProtobufError.decodeFailure(e.msg))
-    
+
 type MembershipUpdatePB {.proto3.} = object
   action {.fieldNumber: 1, pint.}: Opt[uint32]
   idCommitment {.fieldNumber: 2.}: Opt[seq[byte]]
