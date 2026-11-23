@@ -2,16 +2,15 @@
 # Copyright (c) 2025 vacp2p
 # Licensed under either of Apache License 2.0 or MIT license.
 
-## Extensions for libp2p's protobuf library implementation.
-## Based on logos-messaging-nim patterns.
+## Protobuf support for the codec: re-exports nim-protobuf-serialization and
+## defines the codec's error type.
 
 {.push raises: [].}
 
-import std/options
-import ./minprotobuf
-import libp2p/varint
-
-export minprotobuf, varint
+import protobuf_serialization except ProtobufError
+import protobuf_serialization/pkg/results as pb_results
+export protobuf_serialization except ProtobufError
+export pb_results
 
 type
   ProtobufErrorKind* {.pure.} = enum
@@ -22,37 +21,20 @@ type
   ProtobufError* = object
     case kind*: ProtobufErrorKind
     of DecodeFailure:
-      error*: minprotobuf.ProtoError
+      error*: string
     of MissingRequiredField, InvalidLengthField:
       field*: string
 
   ProtobufResult*[T] = Result[T, ProtobufError]
 
-converter toProtobufError*(err: minprotobuf.ProtoError): ProtobufError =
-  case err
-  of minprotobuf.ProtoError.RequiredFieldMissing:
-    ProtobufError(kind: ProtobufErrorKind.MissingRequiredField, field: "unknown")
-  else:
-    ProtobufError(kind: ProtobufErrorKind.DecodeFailure, error: err)
+proc decodeFailure*(T: type ProtobufError, error: string): T =
+  ProtobufError(kind: ProtobufErrorKind.DecodeFailure, error: error)
 
 proc missingRequiredField*(T: type ProtobufError, field: string): T =
   ProtobufError(kind: ProtobufErrorKind.MissingRequiredField, field: field)
 
 proc invalidLengthField*(T: type ProtobufError, field: string): T =
   ProtobufError(kind: ProtobufErrorKind.InvalidLengthField, field: field)
-
-proc write3*(proto: var ProtoBuffer, field: int, value: auto) =
-  when value is Option:
-    if value.isSome():
-      proto.write(field, value.get())
-  else:
-    proto.write(field, value)
-
-proc finish3*(proto: var ProtoBuffer) =
-  if proto.buffer.len > 0:
-    proto.finish()
-  else:
-    proto.offset = 0
 
 proc `$`*(err: ProtobufError): string =
   case err.kind

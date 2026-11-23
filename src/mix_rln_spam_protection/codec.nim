@@ -28,6 +28,14 @@ import ./protobuf
 import ./types
 import ./constants
 
+type RateLimitProofPB {.proto3.} = object
+  proof {.fieldNumber: 1.}: Opt[seq[byte]]
+  merkleRoot {.fieldNumber: 2.}: Opt[seq[byte]]
+  epoch {.fieldNumber: 3.}: Opt[seq[byte]]
+  shareX {.fieldNumber: 4.}: Opt[seq[byte]]
+  shareY {.fieldNumber: 5.}: Opt[seq[byte]]
+  nullifier {.fieldNumber: 6.}: Opt[seq[byte]]
+
 proc isCanonicalEpoch(epoch: openArray[byte]): bool =
   ## calcEpoch stores the epoch number in the first 8 bytes and zero-pads the
   ## rest, so a non-zero tail is a second encoding of the same epoch number.
@@ -36,178 +44,137 @@ proc isCanonicalEpoch(epoch: openArray[byte]): bool =
       return false
   true
 
+proc copyBytesField[N: static int](
+    field: Opt[seq[byte]], name: string, dest: var array[N, byte]
+): ProtobufResult[void] =
+  let bytes = field.valueOr:
+    return err(ProtobufError.missingRequiredField(name))
+  if bytes.len != N:
+    return err(ProtobufError.invalidLengthField(name))
+  copyMem(addr dest[0], unsafeAddr bytes[0], N)
+  ok()
+  
+proc decodeRateLimitProofPB(buffer: seq[byte]): ProtobufResult[RateLimitProofPB] =
+  try:
+    ok(Protobuf.decode(buffer, RateLimitProofPB))
+  except SerializationError as e:
+    err(ProtobufError.decodeFailure(e.msg))
+    
+type MembershipUpdatePB {.proto3.} = object
+  action {.fieldNumber: 1, pint.}: Opt[uint32]
+  idCommitment {.fieldNumber: 2.}: Opt[seq[byte]]
+  userMessageLimit {.fieldNumber: 3, pint.}: Opt[uint64]
+  index {.fieldNumber: 4, pint.}: Opt[uint64]
+
+type ProofMetadataBroadcastPB {.proto3.} = object
+  nullifier {.fieldNumber: 1.}: Opt[seq[byte]]
+  shareX {.fieldNumber: 2.}: Opt[seq[byte]]
+  shareY {.fieldNumber: 3.}: Opt[seq[byte]]
+  externalNullifier {.fieldNumber: 4.}: Opt[seq[byte]]
+  epoch {.fieldNumber: 5.}: Opt[seq[byte]]
+
 # RateLimitProof encoding/decoding
 
-proc encode*(proof: RateLimitProof): ProtoBuffer =
-  ## Encode a RateLimitProof to protobuf.
-  var buf = initProtoBuffer()
-
-  buf.write3(1, @(proof.proof)) # proof: 128 bytes
-  buf.write3(2, @(proof.merkleRoot)) # merkle_root: 32 bytes
-  buf.write3(3, @(proof.epoch)) # epoch: 32 bytes
-  buf.write3(4, @(proof.shareX)) # share_x: 32 bytes
-  buf.write3(5, @(proof.shareY)) # share_y: 32 bytes
-  buf.write3(6, @(proof.nullifier)) # nullifier: 32 bytes
-  buf.finish3()
-
-  buf
+proc encode*(proof: RateLimitProof): seq[byte] =
+  Protobuf.encode(
+    RateLimitProofPB(
+      proof: Opt.some(@(proof.proof)),
+      merkleRoot: Opt.some(@(proof.merkleRoot)),
+      epoch: Opt.some(@(proof.epoch)),
+      shareX: Opt.some(@(proof.shareX)),
+      shareY: Opt.some(@(proof.shareY)),
+      nullifier: Opt.some(@(proof.nullifier)),
+    )
+  )
 
 proc decode*(T: type RateLimitProof, buffer: seq[byte]): ProtobufResult[T] =
-  ## Decode protobuf bytes to a RateLimitProof.
+  let pb = ?decodeRateLimitProofPB(buffer)
+
   var proof: RateLimitProof
-  let pb = initProtoBuffer(buffer)
-
-  var proofBytes: seq[byte]
-  if not ?pb.getField(1, proofBytes):
-    return err(ProtobufError.missingRequiredField("proof"))
-  if proofBytes.len != ZksnarkProofByteSize:
-    return err(ProtobufError.invalidLengthField("proof"))
-  copyMem(addr proof.proof[0], addr proofBytes[0], ZksnarkProofByteSize)
-
-  var merkleRoot: seq[byte]
-  if not ?pb.getField(2, merkleRoot):
-    return err(ProtobufError.missingRequiredField("merkle_root"))
-  if merkleRoot.len != HashByteSize:
-    return err(ProtobufError.invalidLengthField("merkle_root"))
-  copyMem(addr proof.merkleRoot[0], addr merkleRoot[0], HashByteSize)
-
-  var epoch: seq[byte]
-  if not ?pb.getField(3, epoch):
-    return err(ProtobufError.missingRequiredField("epoch"))
-  if epoch.len != HashByteSize:
+  ?pb.proof.copyBytesField("proof", proof.proof)
+  ?pb.merkleRoot.copyBytesField("merkle_root", proof.merkleRoot)
+  ?pb.epoch.copyBytesField("epoch", proof.epoch)
+  if not isCanonicalEpoch(proof.epoch):
     return err(ProtobufError.invalidLengthField("epoch"))
-  if not isCanonicalEpoch(epoch):
-    return err(ProtobufError.invalidLengthField("epoch"))
-  copyMem(addr proof.epoch[0], addr epoch[0], HashByteSize)
-
-  var shareX: seq[byte]
-  if not ?pb.getField(4, shareX):
-    return err(ProtobufError.missingRequiredField("share_x"))
-  if shareX.len != HashByteSize:
-    return err(ProtobufError.invalidLengthField("share_x"))
-  copyMem(addr proof.shareX[0], addr shareX[0], HashByteSize)
-
-  var shareY: seq[byte]
-  if not ?pb.getField(5, shareY):
-    return err(ProtobufError.missingRequiredField("share_y"))
-  if shareY.len != HashByteSize:
-    return err(ProtobufError.invalidLengthField("share_y"))
-  copyMem(addr proof.shareY[0], addr shareY[0], HashByteSize)
-
-  var nullifier: seq[byte]
-  if not ?pb.getField(6, nullifier):
-    return err(ProtobufError.missingRequiredField("nullifier"))
-  if nullifier.len != HashByteSize:
-    return err(ProtobufError.invalidLengthField("nullifier"))
-  copyMem(addr proof.nullifier[0], addr nullifier[0], HashByteSize)
-
+  ?pb.shareX.copyBytesField("share_x", proof.shareX)
+  ?pb.shareY.copyBytesField("share_y", proof.shareY)
+  ?pb.nullifier.copyBytesField("nullifier", proof.nullifier)
   ok(proof)
 
 # MembershipUpdate encoding/decoding
+proc encode*(update: MembershipUpdate): seq[byte] =
+  Protobuf.encode(
+    MembershipUpdatePB(
+      action: Opt.some(uint32(ord(update.action))),
+      idCommitment: Opt.some(@(update.idCommitment)),
+      userMessageLimit: Opt.some(update.userMessageLimit),
+      index: Opt.some(update.index),
+    )
+  )
 
-proc encode*(update: MembershipUpdate): ProtoBuffer =
-  ## Encode a MembershipUpdate to protobuf.
-  var buf = initProtoBuffer()
-
-  buf.write3(1, uint32(ord(update.action)))
-  buf.write3(2, @(update.idCommitment))
-  buf.write3(3, update.userMessageLimit)
-  buf.write3(4, update.index)
-  buf.finish3()
-
-  buf
+proc decodeMembershipUpdatePB(buffer: seq[byte]): ProtobufResult[MembershipUpdatePB] =
+  try:
+    ok(Protobuf.decode(buffer, MembershipUpdatePB))
+  except SerializationError as e:
+    err(ProtobufError.decodeFailure(e.msg))
 
 proc decode*(T: type MembershipUpdate, buffer: seq[byte]): ProtobufResult[T] =
-  ## Decode protobuf bytes to a MembershipUpdate.
-  var update: MembershipUpdate
-  let pb = initProtoBuffer(buffer)
+  let pb = ?decodeMembershipUpdatePB(buffer)
 
-  var action: uint32
-  if not ?pb.getField(1, action):
+  var update: MembershipUpdate
+  let action = pb.action.valueOr:
     return err(ProtobufError.missingRequiredField("action"))
   if action > 1:
     return err(ProtobufError.invalidLengthField("action"))
   update.action = MembershipAction(action)
 
-  var idCommitment: seq[byte]
-  if not ?pb.getField(2, idCommitment):
-    return err(ProtobufError.missingRequiredField("id_commitment"))
-  if idCommitment.len != HashByteSize:
-    return err(ProtobufError.invalidLengthField("id_commitment"))
-  copyMem(addr update.idCommitment[0], addr idCommitment[0], HashByteSize)
+  ?pb.idCommitment.copyBytesField("id_commitment", update.idCommitment)
 
-  var userMessageLimit: uint64
-  if not ?pb.getField(3, userMessageLimit):
+  update.userMessageLimit = pb.userMessageLimit.valueOr:
     return err(ProtobufError.missingRequiredField("user_message_limit"))
-  update.userMessageLimit = userMessageLimit
 
-  var index: uint64
-  if not ?pb.getField(4, index):
+  update.index = pb.index.valueOr:
     return err(ProtobufError.missingRequiredField("index"))
-  if index >= MerkleTreeCapacity:
+  if update.index >= MerkleTreeCapacity:
     return err(ProtobufError.invalidLengthField("index"))
-  update.index = index
 
   ok(update)
 
 # ProofMetadataBroadcast encoding/decoding
 # Note: This maps to a simplified version for backward compatibility
 
-proc encode*(broadcast: ProofMetadataBroadcast): ProtoBuffer =
-  ## Encode a ProofMetadataBroadcast to protobuf.
-  ## Uses a flat structure for single proof metadata broadcast.
-  var buf = initProtoBuffer()
+proc encode*(broadcast: ProofMetadataBroadcast): seq[byte] =
+  Protobuf.encode(
+    ProofMetadataBroadcastPB(
+      nullifier: Opt.some(@(broadcast.nullifier)),
+      shareX: Opt.some(@(broadcast.shareX)),
+      shareY: Opt.some(@(broadcast.shareY)),
+      externalNullifier: Opt.some(@(broadcast.externalNullifier)),
+      epoch: Opt.some(@(broadcast.epoch)),
+    )
+  )
 
-  buf.write3(1, @(broadcast.nullifier))
-  buf.write3(2, @(broadcast.shareX))
-  buf.write3(3, @(broadcast.shareY))
-  buf.write3(4, @(broadcast.externalNullifier))
-  buf.write3(5, @(broadcast.epoch))
-  buf.finish3()
-
-  buf
+proc decodeProofMetadataBroadcastPB(
+    buffer: seq[byte]
+): ProtobufResult[ProofMetadataBroadcastPB] =
+  try:
+    ok(Protobuf.decode(buffer, ProofMetadataBroadcastPB))
+  except SerializationError as e:
+    err(ProtobufError.decodeFailure(e.msg))
 
 proc decode*(T: type ProofMetadataBroadcast, buffer: seq[byte]): ProtobufResult[T] =
-  ## Decode protobuf bytes to a ProofMetadataBroadcast.
+  let pb = ?decodeProofMetadataBroadcastPB(buffer)
+
   var broadcast: ProofMetadataBroadcast
-  let pb = initProtoBuffer(buffer)
-
-  var nullifier: seq[byte]
-  if not ?pb.getField(1, nullifier):
-    return err(ProtobufError.missingRequiredField("nullifier"))
-  if nullifier.len != HashByteSize:
-    return err(ProtobufError.invalidLengthField("nullifier"))
-  copyMem(addr broadcast.nullifier[0], addr nullifier[0], HashByteSize)
-
-  var shareX: seq[byte]
-  if not ?pb.getField(2, shareX):
-    return err(ProtobufError.missingRequiredField("share_x"))
-  if shareX.len != HashByteSize:
-    return err(ProtobufError.invalidLengthField("share_x"))
-  copyMem(addr broadcast.shareX[0], addr shareX[0], HashByteSize)
-
-  var shareY: seq[byte]
-  if not ?pb.getField(3, shareY):
-    return err(ProtobufError.missingRequiredField("share_y"))
-  if shareY.len != HashByteSize:
-    return err(ProtobufError.invalidLengthField("share_y"))
-  copyMem(addr broadcast.shareY[0], addr shareY[0], HashByteSize)
-
-  var externalNullifier: seq[byte]
-  if not ?pb.getField(4, externalNullifier):
-    return err(ProtobufError.missingRequiredField("external_nullifier"))
-  if externalNullifier.len != HashByteSize:
-    return err(ProtobufError.invalidLengthField("external_nullifier"))
-  copyMem(addr broadcast.externalNullifier[0], addr externalNullifier[0], HashByteSize)
-
-  var epoch: seq[byte]
-  if not ?pb.getField(5, epoch):
-    return err(ProtobufError.missingRequiredField("epoch"))
-  if epoch.len != HashByteSize:
+  ?pb.nullifier.copyBytesField("nullifier", broadcast.nullifier)
+  ?pb.shareX.copyBytesField("share_x", broadcast.shareX)
+  ?pb.shareY.copyBytesField("share_y", broadcast.shareY)
+  ?pb.externalNullifier.copyBytesField(
+    "external_nullifier", broadcast.externalNullifier
+  )
+  ?pb.epoch.copyBytesField("epoch", broadcast.epoch)
+  if not isCanonicalEpoch(broadcast.epoch):
     return err(ProtobufError.invalidLengthField("epoch"))
-  if not isCanonicalEpoch(epoch):
-    return err(ProtobufError.invalidLengthField("epoch"))
-  copyMem(addr broadcast.epoch[0], addr epoch[0], HashByteSize)
 
   ok(broadcast)
 
@@ -215,12 +182,12 @@ proc decode*(T: type ProofMetadataBroadcast, buffer: seq[byte]): ProtobufResult[
 
 proc toBytes*(proof: RateLimitProof): seq[byte] =
   ## Serialize a RateLimitProof to bytes using protobuf.
-  proof.encode().buffer
+  proof.encode()
 
 proc toBytes*(update: MembershipUpdate): seq[byte] =
   ## Serialize a MembershipUpdate to bytes using protobuf.
-  update.encode().buffer
+  update.encode()
 
 proc toBytes*(broadcast: ProofMetadataBroadcast): seq[byte] =
   ## Serialize a ProofMetadataBroadcast to bytes using protobuf.
-  broadcast.encode().buffer
+  broadcast.encode()

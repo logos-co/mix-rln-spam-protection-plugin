@@ -60,7 +60,6 @@ template checkWireFormat(value: typed, expectedHex: string) =
   let expected = fromHex(expectedHex)
   check expected.len > 0
   check value.toBytes() == expected
-  check value.encode().buffer == expected
   let decoded = typeof(value).decode(expected)
   check decoded.isOk()
   check decoded.get() == value

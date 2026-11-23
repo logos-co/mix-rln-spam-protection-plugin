@@ -15,6 +15,7 @@ requires "metrics >= 0.2.2"
 requires "nimcrypto >= 0.6.0"
 requires "secp256k1 >= 0.8.0.8.0"
 requires "json_serialization >= 0.2.0"
+requires "protobuf_serialization >= 0.6.2"
 
 # Keep the plugin and standalone Mix facade on compatible libp2p/Mix APIs.
 requires "libp2p >= 2.3.1"
