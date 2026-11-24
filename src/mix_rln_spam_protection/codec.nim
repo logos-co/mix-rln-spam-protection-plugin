@@ -21,6 +21,22 @@
 ##     uint64 user_message_limit = 3;
 ##     uint64 index = 4;
 ##   }
+##
+##   message ProofMetadataEntry {
+##     bytes nullifier = 1;
+##     bytes share_x = 2;
+##     bytes share_y = 3;
+##     bytes external_nullifier = 4;
+##     bytes epoch = 5;
+##   }
+##
+##   message MessagingMetadata {
+##     repeated ProofMetadataEntry entries = 1;
+##   }
+##
+## ProofMetadataEntry is the flat ProofMetadataBroadcast encoding. The
+## coordination payload is MessagingMetadata, including a message of one
+## entry. A bare entry is not a payload.
 
 {.push raises: [].}
 
@@ -141,7 +157,7 @@ proc decode*(T: type MembershipUpdate, buffer: seq[byte]): ProtobufResult[T] =
   ok(update)
 
 # ProofMetadataBroadcast encoding/decoding
-# Note: This maps to a simplified version for backward compatibility
+# One entry. A batch is a repeated list of these encodings.
 
 proc encode*(broadcast: ProofMetadataBroadcast): seq[byte] =
   Protobuf.encode(
@@ -189,5 +205,50 @@ proc toBytes*(update: MembershipUpdate): seq[byte] =
   update.encode()
 
 proc toBytes*(broadcast: ProofMetadataBroadcast): seq[byte] =
-  ## Serialize a ProofMetadataBroadcast to bytes using protobuf.
+  ## Serialize one proof-metadata entry to bytes using protobuf.
   broadcast.encode()
+
+type DecodedMetadata* = object
+  entries*: seq[ProofMetadataBroadcast]
+  malformed*: int ## Entry blobs inside a batch that did not decode.
+
+type MessagingMetadataPB {.proto3.} = object
+  ## Entries stay raw so one bad entry does not fail the whole batch.
+  entries {.fieldNumber: 1.}: seq[seq[byte]]
+
+proc encode*(batch: MessagingMetadata): seq[byte] =
+  ## Encode a batch as repeated ProofMetadataEntry messages.
+  var pb = MessagingMetadataPB()
+  for entry in batch.entries:
+    pb.entries.add(entry.toBytes())
+  Protobuf.encode(pb)
+
+proc toBytes*(batch: MessagingMetadata): seq[byte] =
+  ## Serialize a proof-metadata batch to bytes using protobuf.
+  batch.encode()
+
+proc decodeMessagingMetadataPB(buffer: seq[byte]): ProtobufResult[MessagingMetadataPB] =
+  try:
+    ok(Protobuf.decode(buffer, MessagingMetadataPB))
+  except SerializationError as e:
+    err(ProtobufError.decodeFailure(e.msg))
+
+proc decodeMetadata*(data: seq[byte]): ProtobufResult[DecodedMetadata] =
+  ## Decode a MessagingMetadata. A bad entry is counted in `malformed` and
+  ## the entries that decoded are still returned. A payload with no entry
+  ## that decodes is an error, which covers a bare entry: its field 1 is a
+  ## 32-byte nullifier, not an entry.
+  let pb = ?decodeMessagingMetadataPB(data)
+  if pb.entries.len == 0:
+    return err(ProtobufError.missingRequiredField("entries"))
+
+  var decoded = DecodedMetadata()
+  for blob in pb.entries:
+    let entry = ProofMetadataBroadcast.decode(blob)
+    if entry.isOk:
+      decoded.entries.add(entry.get())
+    else:
+      inc decoded.malformed
+  if decoded.entries.len == 0:
+    return err(ProtobufError.missingRequiredField("entries"))
+  ok(decoded)
