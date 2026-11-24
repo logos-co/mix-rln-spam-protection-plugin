@@ -227,9 +227,7 @@ proc toBytes*(batch: MessagingMetadata): seq[byte] =
   ## Serialize a proof-metadata batch to bytes using protobuf.
   batch.encode()
 
-proc decodeMessagingMetadataPB(
-    buffer: seq[byte]
-): ProtobufResult[MessagingMetadataPB] =
+proc decodeMessagingMetadataPB(buffer: seq[byte]): ProtobufResult[MessagingMetadataPB] =
   try:
     ok(Protobuf.decode(buffer, MessagingMetadataPB))
   except SerializationError as e:
