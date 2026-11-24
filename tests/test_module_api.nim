@@ -6,6 +6,11 @@ import
 
 var testNow: int64
 
+type RawBatchPB {.proto3.} = object
+  ## Hand-built coordination payloads, including malformed ones.
+  entries {.fieldNumber: 1.}: seq[seq[byte]]
+  extra {.fieldNumber: 2.}: seq[seq[byte]]
+
 proc testClock(): int64 {.gcsafe, raises: [].} =
   testNow
 
@@ -497,17 +502,15 @@ proc checkBatchSkips() {.async.} =
   stale.nullifier[0] = 12
   stale.epoch = epochField(epoch + 100)
   stale.shareX[0] = 1
-  var buf = initProtoBuffer()
-  buf.write3(1, fresh.toBytes())
-  buf.write3(1, @[byte 1, 2, 3])
-  buf.write3(1, stale.toBytes())
-  buf.finish3()
+  let buf = Protobuf.encode(
+    RawBatchPB(entries: @[fresh.toBytes(), @[byte 1, 2, 3], stale.toBytes()])
+  )
 
   mix_rln_metadata_entries_skipped.inc(0, labelValues = ["malformed"])
   mix_rln_metadata_entries_skipped.inc(0, labelValues = ["epoch_gap"])
   let malformedBefore = mix_rln_metadata_entries_skipped.value(["malformed"])
   let gapBefore = mix_rln_metadata_entries_skipped.value(["epoch_gap"])
-  check sp.handleProofMetadata(buf.buffer).isOk
+  check sp.handleProofMetadata(buf).isOk
   when defined(metrics):
     check mix_rln_metadata_entries_skipped.value(["malformed"]) == malformedBefore + 1
     check mix_rln_metadata_entries_skipped.value(["epoch_gap"]) == gapBefore + 1
@@ -653,16 +656,10 @@ suite "Shared RLN module adapter":
     check one.entries.len == 1
     check one.entries[0].nullifier == entry.nullifier
     check decodeMetadata(@[1.byte, 2, 3]).isErr
-    var broken = initProtoBuffer()
-    broken.write3(1, @[1.byte])
-    broken.write3(2, @[2.byte])
-    broken.finish3()
-    check decodeMetadata(broken.buffer).isErr
-    var junk = initProtoBuffer()
-    junk.write3(1, @[1.byte, 2, 3])
-    junk.write3(1, newSeq[byte]())
-    junk.finish3()
-    check decodeMetadata(junk.buffer).isErr
+    let broken = Protobuf.encode(RawBatchPB(entries: @[@[1.byte]], extra: @[@[2.byte]]))
+    check decodeMetadata(broken).isErr
+    let junk = Protobuf.encode(RawBatchPB(entries: @[@[1.byte, 2, 3], newSeq[byte]()]))
+    check decodeMetadata(junk).isErr
 
   test "one epoch of proofs publishes one batch after the epoch ends":
     waitFor checkEpochBatch()
